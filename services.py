@@ -5,6 +5,8 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+import streamlit as st
+
 from database import audit, connection
 
 
@@ -19,6 +21,7 @@ def query_df(sql: str, params: Iterable[Any] = ()) -> pd.DataFrame:
         )
 
 
+@st.cache_data(ttl=60)
 def get_groups(active_only: bool = True) -> pd.DataFrame:
     where = "WHERE active = 1" if active_only else ""
     return query_df(
@@ -31,6 +34,7 @@ def get_groups(active_only: bool = True) -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=60)
 def get_stores(group_id: int | None = None, active_only: bool = True) -> pd.DataFrame:
     clauses, params = [], []
     if group_id is not None:
@@ -50,6 +54,11 @@ def get_stores(group_id: int | None = None, active_only: bool = True) -> pd.Data
     )
 
 
+def _clear_store_cache() -> None:
+    get_groups.clear()
+    get_stores.clear()
+
+
 def add_group(group_name: str) -> int:
     name = group_name.strip()
     if not name:
@@ -61,7 +70,8 @@ def add_group(group_name: str) -> int:
         ).fetchone()
         group_id = row["id"]
         audit(conn, "group", group_id, "CREATE", new_values={"group_name": name})
-        return group_id
+    _clear_store_cache()
+    return group_id
 
 
 def update_group(group_id: int, group_name: str, active: bool) -> None:
@@ -98,6 +108,7 @@ def update_group(group_id: int, group_name: str, active: bool) -> None:
             old_values=old,
             new_values={"group_name": name, "active": active},
         )
+    _clear_store_cache()
 
 
 def delete_group(group_id: int) -> None:
@@ -113,6 +124,7 @@ def delete_group(group_id: int) -> None:
         if old:
             conn.execute("DELETE FROM store_groups WHERE id = ?", (group_id,))
             audit(conn, "group", group_id, "DELETE", old_values=dict(old))
+    _clear_store_cache()
 
 
 def add_store(store_name: str, group_id: int) -> int:
@@ -140,7 +152,8 @@ def add_store(store_name: str, group_id: int) -> int:
             "CREATE",
             new_values={"store_name": name, "group_name": group["group_name"]},
         )
-        return store_id
+    _clear_store_cache()
+    return store_id
 
 
 def update_store(store_id: int, store_name: str, group_id: int, active: bool) -> None:
@@ -177,6 +190,7 @@ def update_store(store_id: int, store_name: str, group_id: int, active: bool) ->
                 "active": active,
             },
         )
+    _clear_store_cache()
 
 
 def delete_store(store_id: int) -> None:
@@ -185,6 +199,7 @@ def delete_store(store_id: int) -> None:
         if old:
             conn.execute("DELETE FROM stores WHERE id = ?", (store_id,))
             audit(conn, "store", store_id, "DELETE", old_values=dict(old))
+    _clear_store_cache()
 
 
 def _next_pallet_id(conn, shipment_date: date | str) -> str:

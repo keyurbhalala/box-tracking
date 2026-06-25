@@ -7,7 +7,21 @@ from typing import Any, Iterator
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import streamlit as st
+
+
+# ---------------------------------------------------------------------------
+# Connection pool — created once per session, reused on every interaction
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _pool() -> psycopg2.pool.ThreadedConnectionPool:
+    return psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=5,
+        dsn=st.secrets["DATABASE_URL"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +55,8 @@ class _Conn:
 
 @contextmanager
 def connection() -> Iterator[_Conn]:
-    raw = psycopg2.connect(st.secrets["DATABASE_URL"])
+    pool = _pool()
+    raw = pool.getconn()
     raw.autocommit = False
     try:
         yield _Conn(raw)
@@ -50,7 +65,7 @@ def connection() -> Iterator[_Conn]:
         raw.rollback()
         raise
     finally:
-        raw.close()
+        pool.putconn(raw)
 
 
 # ---------------------------------------------------------------------------
