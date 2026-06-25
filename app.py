@@ -39,7 +39,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-init_db()
+@st.cache_resource
+def _init_db_once():
+    init_db()
+
+_init_db_once()
 
 st.markdown(
     """

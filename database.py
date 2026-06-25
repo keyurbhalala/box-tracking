@@ -19,7 +19,7 @@ import streamlit as st
 def _pool() -> psycopg2.pool.ThreadedConnectionPool:
     return psycopg2.pool.ThreadedConnectionPool(
         minconn=1,
-        maxconn=5,
+        maxconn=20,
         dsn=st.secrets["DATABASE_URL"],
     )
 
@@ -253,13 +253,17 @@ def init_db() -> None:
         if group_count == 0:
             # Truly fresh database — seed default groups and stores
             for group_name, stores in DEFAULT_GROUPS.items():
+                conn.execute(
+                    "INSERT INTO store_groups (group_name) VALUES (?) ON CONFLICT (group_name) DO NOTHING",
+                    (group_name,),
+                )
                 row = conn.execute(
-                    "INSERT INTO store_groups (group_name) VALUES (?) RETURNING id",
+                    "SELECT id FROM store_groups WHERE group_name = ?",
                     (group_name,),
                 ).fetchone()
                 group_id = row["id"]
                 conn.executemany(
-                    "INSERT INTO stores (store_name, group_id, group_name) VALUES (?, ?, ?)",
+                    "INSERT INTO stores (store_name, group_id, group_name) VALUES (?, ?, ?) ON CONFLICT (store_name) DO NOTHING",
                     [(store, group_id, group_name) for store in stores],
                 )
 
