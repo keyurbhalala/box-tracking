@@ -124,25 +124,90 @@ _DDL = [
 ]
 
 DEFAULT_GROUPS = {
-    "Wellington Group": [
-        "Wellington CBD",
-        "Lower Hutt",
-        "Porirua",
-        "Kapiti",
-        "Upper Hutt",
-        "Other Wellington stores",
-    ],
     "Christchurch Group": [
-        "Christchurch Store 1",
-        "Christchurch Store 2",
-        "Christchurch Store 3",
+        "Christchurch CBD", "Colombo Sydenham", "Linwood", "New Brighton",
+        "Kaipoi", "Edgeware", "Rangiora",
+    ],
+    "Dunedin Group": [
+        "Dunedin Central", "Mosgiel", "South Dunedin",
+    ],
+    "Hornby Group": [
+        "Papanui", "Hornby", "Riccarton",
+    ],
+    "Invercargill Group": [
+        "Gore", "Invercargill",
+    ],
+    "Nelson Group": [
+        "Motueka", "Nelson", "Richmond",
+    ],
+    "Timaru Group": [
+        "Oamaru", "Timaru", "Temuka",
+    ],
+    "Blenheim Group": [
+        "Blenheim", "Picton",
+    ],
+    # South Island standalone stores — each ships individually
+    "Ashburton": ["Ashburton"],
+    "Queenstown": ["Queenstown"],
+    "Greymouth": ["Greymouth"],
+    "Westport": ["Westport"],
+    "Wellington Group": [
+        "Lambton", "Lower Hutt Central", "Newtown", "Porirua",
+        "Te Aro, Wellington City", "Upper Hutt", "Wainuiomata", "Tawa",
+    ],
+    "Palmy Group": [
+        "Feilding", "Palmerston North",
+    ],
+    "Levin Group": [
+        "Levin", "Paraparaumu", "Otaki",
+    ],
+    "Hawke's Bay Group": [
+        "Hastings", "Napier South", "Taradale", "Waipukurau",
+    ],
+    "New Plymouth Group": [
+        "New Plymouth", "Waitara", "Inglewood",
+    ],
+    "Tauranga Group": [
+        "Greerton", "Bethlehem", "Mt Manganui", "Papamoa", "Tauranga", "Te Puke",
     ],
     "Hamilton Group": [
-        "Hamilton Central",
-        "Te Rapa",
-        "Other Hamilton stores",
+        "Te Rapa", "Cambridge", "Dinsdale", "Fairfield", "Grey St Hamilton East",
+        "Hamilton CBD", "Melville", "Matamata", "Te Awamutu", "Morrinsville",
+        "Te Kuiti", "Huntly", "Hillcrest", "Tokoroa",
     ],
-    "Standalone Stores": ["Thames", "Gisborne", "Kaitaia", "Whangarei"],
+    "Rotorua Group": [
+        "Rotorua", "Redwoods",
+    ],
+    # North Island standalone stores — each ships individually
+    "Whakatane": ["Whakatane"],
+    "Whanganui": ["Whanganui"],
+    "Kerikeri": ["Kerikeri"],
+    "Gisborne": ["Gisborne"],
+    "Hawera": ["Hawera"],
+    "Kaitaia": ["Kaitaia"],
+    "Masterton": ["Masterton"],
+    "Paeroa": ["Paeroa"],
+    "Wairoa": ["Wairoa"],
+    "Thames": ["Thames"],
+    "Whangarei": ["Whangarei"],
+    "Dargaville": ["Dargaville"],
+    "Taupo": ["Taupo"],
+    "North Auckland": [
+        "Albany", "Birkenhead", "Browns Bay", "Constellation", "Glenfield",
+        "Northcote", "Silverdale", "Takapuna", "Wairau", "Warkworth", "Whangaparaoa",
+    ],
+    "West Auckland": [
+        "Blockhouse Bay", "Dominion RD", "Glen Eden", "Lincoln Road", "Mangere",
+        "New Lynn", "Onehunga Mall", "Point Chevalier", "Westgate", "Kumeu",
+        "Kingsland", "Henderson", "Avondale",
+    ],
+    "South Auckland": [
+        "East Tamaki", "Glen Innes", "Howick", "Manukau", "Mt Wellington",
+        "Otahuhu", "Pakuranga", "Papakura", "Papatoetoe", "Takanini", "Hunter Plaza",
+    ],
+    "Auckland CBD": [
+        "Hobson Street", "K Road", "Newmarket", "Quay Street", "Victoria Street",
+    ],
 }
 
 
@@ -151,8 +216,14 @@ def init_db() -> None:
         for stmt in _DDL:
             conn.execute(stmt)
 
-        count = conn.execute("SELECT COUNT(*) AS cnt FROM store_groups").fetchone()["cnt"]
-        if count == 0:
+        shipment_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM shipments"
+        ).fetchone()["cnt"]
+
+        if shipment_count == 0:
+            # No real data yet — safe to clear and reseed with current DEFAULT_GROUPS
+            conn.execute("DELETE FROM stores")
+            conn.execute("DELETE FROM store_groups")
             for group_name, stores in DEFAULT_GROUPS.items():
                 row = conn.execute(
                     "INSERT INTO store_groups (group_name) VALUES (?) RETURNING id",
