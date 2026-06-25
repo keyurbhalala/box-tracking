@@ -196,7 +196,7 @@ def render_new_shipment() -> None:
     with st.form("new_shipment", clear_on_submit=False):
         c1, c2 = st.columns([1, 1])
         shipment_date = c1.date_input("Shipment Date", value=date.today())
-        method = c2.selectbox("Shipment Method", METHODS)
+        method = c2.selectbox("Shipment Method", ["", *METHODS], format_func=lambda x: "— Select method —" if x == "" else x)
         notes = st.text_area("Notes", placeholder="Optional reference or instructions")
         if stores.empty:
             st.warning("This group has no active stores.")
@@ -219,6 +219,9 @@ def render_new_shipment() -> None:
             "Save Shipment", type="primary", use_container_width=True
         )
     if submitted:
+        if not method:
+            st.error("Please select a Shipment Method before saving.")
+            return
         details = [
             {
                 "store_id": int(row["Store ID"]),
