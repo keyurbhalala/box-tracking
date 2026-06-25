@@ -231,14 +231,12 @@ def init_db() -> None:
         for stmt in _DDL:
             conn.execute(stmt)
 
-        shipment_count = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM shipments"
+        group_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM store_groups"
         ).fetchone()["cnt"]
 
-        if shipment_count == 0:
-            # No real data yet — safe to clear and reseed with current DEFAULT_GROUPS
-            conn.execute("DELETE FROM stores")
-            conn.execute("DELETE FROM store_groups")
+        if group_count == 0:
+            # Truly fresh database — seed default groups and stores
             for group_name, stores in DEFAULT_GROUPS.items():
                 row = conn.execute(
                     "INSERT INTO store_groups (group_name) VALUES (?) RETURNING id",
