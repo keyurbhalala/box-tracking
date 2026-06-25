@@ -41,22 +41,26 @@ init_db()
 st.markdown(
     """
     <style>
-    :root { --brand: #0f766e; --ink: #102a43; }
-    .stApp { background: #f5f7fa; }
-    [data-testid="stSidebar"] { background: #102a43; }
-    [data-testid="stSidebar"] * { color: #f8fafc; }
+    :root { --brand: #0f766e; }
+    [data-testid="stSidebar"] { background: #102a43 !important; }
+    [data-testid="stSidebar"] * { color: #f8fafc !important; }
     [data-testid="stMetric"] {
-        background: white; border: 1px solid #e5e7eb; border-radius: 14px;
-        padding: 16px; box-shadow: 0 4px 18px rgba(15, 23, 42, .05);
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128,128,128,0.2);
+        border-radius: 14px;
+        padding: 16px;
+        box-shadow: 0 4px 18px rgba(0,0,0,.06);
     }
     .hero {
         background: linear-gradient(120deg, #0f766e, #155e75);
-        color: white; padding: 22px 26px; border-radius: 16px; margin-bottom: 18px;
+        color: white !important; padding: 22px 26px; border-radius: 16px; margin-bottom: 18px;
     }
-    .hero h1 { margin: 0; font-size: 1.8rem; }
-    .hero p { margin: 6px 0 0; opacity: .88; }
+    .hero h1 { margin: 0; font-size: 1.8rem; color: white !important; }
+    .hero p  { margin: 6px 0 0; opacity: .88; color: white !important; }
     .section-card {
-        background: white; border: 1px solid #e5e7eb; border-radius: 14px;
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128,128,128,0.2);
+        border-radius: 14px;
         padding: 18px; margin-bottom: 14px;
     }
     div.stButton > button[kind="primary"] { background: #0f766e; border-color: #0f766e; }
@@ -603,7 +607,7 @@ with st.sidebar:
     st.caption("Wholesale distribution")
     page = st.radio("Navigation", list(PAGES), label_visibility="collapsed")
     st.divider()
-    st.caption("SQLite data is stored locally and backed by an audit trail.")
+    st.caption("Data stored in Supabase and backed by an audit trail.")
 
 PAGES[page]()
 
