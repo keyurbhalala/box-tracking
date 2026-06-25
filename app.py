@@ -185,13 +185,16 @@ def render_new_shipment() -> None:
         st.warning("Add an active group and stores before recording shipments.")
         return
     group_map = dict(zip(groups["group_name"], groups["id"]))
+
+    # Group selector is OUTSIDE the form so changing it immediately reloads stores
+    selected_group = st.selectbox("Group / Store", list(group_map))
+    stores = get_stores(int(group_map[selected_group]))
+
     with st.form("new_shipment", clear_on_submit=False):
-        c1, c2, c3 = st.columns([1, 1, 2])
+        c1, c2 = st.columns([1, 1])
         shipment_date = c1.date_input("Shipment Date", value=date.today())
         method = c2.selectbox("Shipment Method", METHODS)
-        selected_group = c3.selectbox("Group", list(group_map))
         notes = st.text_area("Notes", placeholder="Optional reference or instructions")
-        stores = get_stores(int(group_map[selected_group]))
         if stores.empty:
             st.warning("This group has no active stores.")
         editor = st.data_editor(
