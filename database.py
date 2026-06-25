@@ -136,6 +136,21 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_details_shipment ON shipment_details(shipment_id)",
     "CREATE INDEX IF NOT EXISTS idx_details_store    ON shipment_details(store_id)",
     "CREATE INDEX IF NOT EXISTS idx_details_group    ON shipment_details(group_name)",
+    """
+    CREATE TABLE IF NOT EXISTS delivery_signatures (
+        id              SERIAL PRIMARY KEY,
+        shipment_id     INTEGER NOT NULL,
+        store_id        INTEGER,
+        store_name      TEXT NOT NULL,
+        boxes           INTEGER NOT NULL,
+        signed_by       TEXT,
+        signature_data  TEXT,
+        signed_at       TEXT,
+        FOREIGN KEY (shipment_id) REFERENCES shipments(id) ON DELETE CASCADE,
+        FOREIGN KEY (store_id)   REFERENCES stores(id)    ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_delsig_shipment ON delivery_signatures(shipment_id)",
 ]
 
 DEFAULT_GROUPS = {

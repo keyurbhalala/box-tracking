@@ -513,6 +513,102 @@ def pallet_lookup(pallet_id: str) -> tuple[pd.DataFrame, dict[str, Any] | None]:
         return details, dict(header)
 
 
+def get_delivery_runs(days_back: int = 14) -> pd.DataFrame:
+    """Return recent Delivery shipments with signature progress."""
+    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+    return query_df(
+        """
+        SELECT
+            s.id,
+            s.shipment_date AS "Date",
+            s.notes AS "Notes",
+            COUNT(d.id) AS total_stores,
+            COALESCE(SUM(d.boxes), 0) AS total_boxes,
+            COUNT(sig.id) AS signed_count
+        FROM shipments s
+        JOIN shipment_details d ON d.shipment_id = s.id
+        LEFT JOIN delivery_signatures sig
+               ON sig.shipment_id = s.id AND sig.signed_at IS NOT NULL
+        WHERE s.shipment_method = 'Delivery'
+          AND s.shipment_date >= ?
+        GROUP BY s.id, s.shipment_date, s.notes
+        ORDER BY s.shipment_date DESC, s.id DESC
+        """,
+        (cutoff,),
+    )
+
+
+def get_delivery_details(shipment_id: int) -> pd.DataFrame:
+    """Return stores for a delivery shipment merged with any existing signatures."""
+    return query_df(
+        """
+        SELECT
+            d.id AS detail_id,
+            d.store_id,
+            d.store_name,
+            d.group_name,
+            d.boxes,
+            sig.id AS sig_id,
+            sig.signed_by,
+            sig.signature_data,
+            sig.signed_at
+        FROM shipment_details d
+        LEFT JOIN delivery_signatures sig
+               ON sig.shipment_id = d.shipment_id AND sig.store_id = d.store_id
+        WHERE d.shipment_id = ?
+        ORDER BY d.store_name
+        """,
+        (shipment_id,),
+    )
+
+
+def save_signature(
+    shipment_id: int,
+    store_id: int,
+    store_name: str,
+    boxes: int,
+    signature_data: str,
+    signed_by: str = "",
+) -> None:
+    """Upsert a signature for one store in a delivery shipment."""
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM delivery_signatures WHERE shipment_id = ? AND store_id = ?",
+            (shipment_id, store_id),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE delivery_signatures
+                SET signature_data = ?, signed_by = ?, signed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    signature_data,
+                    signed_by.strip(),
+                    datetime.now().isoformat(timespec="seconds"),
+                    existing["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO delivery_signatures
+                    (shipment_id, store_id, store_name, boxes, signature_data, signed_by, signed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    shipment_id,
+                    store_id,
+                    store_name,
+                    boxes,
+                    signature_data,
+                    signed_by.strip(),
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+
+
 def audit_history(limit: int = 500) -> pd.DataFrame:
     return query_df(
         """

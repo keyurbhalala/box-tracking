@@ -18,11 +18,14 @@ from services import (
     delete_group,
     delete_shipment,
     delete_store,
+    get_delivery_details,
+    get_delivery_runs,
     get_groups,
     get_shipment,
     get_stores,
     history,
     pallet_lookup,
+    save_signature,
     trend_data,
     update_group,
     update_shipment,
@@ -594,9 +597,113 @@ def render_audit_log() -> None:
     downloads(df, "audit_trail")
 
 
+def render_delivery_run() -> None:
+    hero("Delivery Run", "Capture signatures store-by-store as you deliver")
+    try:
+        from streamlit_drawable_canvas import st_canvas
+    except ImportError:
+        st.error("Missing dependency: run `pip install streamlit-drawable-canvas` then restart.")
+        return
+
+    runs = get_delivery_runs()
+    if runs.empty:
+        st.info("No Delivery shipments in the last 14 days. Create one from New Shipment.")
+        return
+
+    # Build a label like "25 Jun — 5 stores / 23 boxes (3/5 signed)"
+    def run_label(row) -> str:
+        d = pd.Timestamp(row["Date"]).strftime("%-d %b")
+        signed = int(row["signed_count"])
+        total = int(row["total_stores"])
+        boxes = int(row["total_boxes"])
+        status = f"{signed}/{total} signed"
+        return f"{d} — {total} stores / {boxes} boxes ({status})"
+
+    run_labels = {run_label(r): int(r["id"]) for _, r in runs.iterrows()}
+    selected_label = st.selectbox("Select delivery run", list(run_labels))
+    shipment_id = run_labels[selected_label]
+
+    details = get_delivery_details(shipment_id)
+
+    # Summary strip
+    total_stores = len(details)
+    signed_count = int(details["signed_at"].notna().sum())
+    total_boxes = int(details["boxes"].sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Stores", total_stores)
+    c2.metric("Total Boxes", f"{total_boxes:,}")
+    c3.metric("Signatures", f"{signed_count}/{total_stores}")
+
+    if signed_count == total_stores:
+        st.success("✅ All stores signed — delivery complete!")
+    else:
+        st.progress(signed_count / total_stores if total_stores else 0)
+
+    st.divider()
+
+    # Per-store signature capture
+    for _, row in details.iterrows():
+        store_name = row["store_name"]
+        boxes = int(row["boxes"])
+        is_signed = pd.notna(row["signed_at"])
+
+        with st.expander(
+            f"{'✅' if is_signed else '⬜'} {store_name} — {boxes} box{'es' if boxes != 1 else ''}",
+            expanded=not is_signed,
+        ):
+            if is_signed:
+                st.caption(f"Signed by: **{row['signed_by'] or 'Unknown'}** at {row['signed_at']}")
+                if row["signature_data"]:
+                    st.image(row["signature_data"], width=300)
+                if st.button("Re-capture signature", key=f"redo_{row['detail_id']}"):
+                    st.session_state[f"redo_{row['detail_id']}"] = True
+                    st.rerun()
+            else:
+                signed_by = st.text_input(
+                    "Receiver name (optional)",
+                    key=f"name_{row['detail_id']}",
+                    placeholder="e.g. Sarah",
+                )
+                st.caption("Ask the store person to sign below:")
+                canvas_result = st_canvas(
+                    fill_color="rgba(0,0,0,0)",
+                    stroke_width=3,
+                    stroke_color="#000000",
+                    background_color="#ffffff",
+                    height=150,
+                    width=400,
+                    drawing_mode="freedraw",
+                    key=f"canvas_{shipment_id}_{row['detail_id']}",
+                )
+                if st.button("Save signature", key=f"save_{row['detail_id']}", type="primary"):
+                    if (
+                        canvas_result.image_data is not None
+                        and canvas_result.image_data.sum() > 0
+                    ):
+                        import io, base64
+                        from PIL import Image
+                        img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        sig_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+                        save_signature(
+                            shipment_id=shipment_id,
+                            store_id=int(row["store_id"]),
+                            store_name=store_name,
+                            boxes=boxes,
+                            signature_data=sig_b64,
+                            signed_by=signed_by,
+                        )
+                        st.success(f"Signed for {store_name}!")
+                        st.rerun()
+                    else:
+                        st.warning("Please capture a signature before saving.")
+
+
 PAGES = {
     "Dashboard": render_dashboard,
     "New Shipment": render_new_shipment,
+    "Delivery Run": render_delivery_run,
     "History & Edit": render_history,
     "Store Lookup": render_store_lookup,
     "Group Reporting": render_group_reporting,
