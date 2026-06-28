@@ -342,6 +342,28 @@ def render_history() -> None:
     )
     header, current_details = get_shipment(int(selected_id))
     all_stores = get_stores(active_only=False)
+    groups = get_groups(active_only=False)
+    group_names = ["All Groups"] + sorted(groups["group_name"].tolist())
+
+    # Default to the group the shipment was originally booked under
+    default_group = "All Groups"
+    if not current_details.empty:
+        booked_groups = current_details["group_name"].dropna().unique().tolist()
+        if len(booked_groups) == 1 and booked_groups[0] in group_names:
+            default_group = booked_groups[0]
+
+    edit_group_filter = st.selectbox(
+        "Filter by Group / Store",
+        group_names,
+        index=group_names.index(default_group),
+        key=f"edit_group_filter_{selected_id}",
+    )
+
+    if edit_group_filter == "All Groups":
+        display_stores = all_stores
+    else:
+        display_stores = all_stores[all_stores["group_name"] == edit_group_filter]
+
     with st.form(f"edit_{selected_id}"):
         e1, e2 = st.columns(2)
         edit_date = e1.date_input(
@@ -351,7 +373,7 @@ def render_history() -> None:
             "Shipment Method", METHODS, index=METHODS.index(header["shipment_method"])
         )
         edit_notes = st.text_area("Notes", value=header["notes"] or "")
-        edit_rows = shipment_editor_rows(all_stores, current_details)
+        edit_rows = shipment_editor_rows(display_stores, current_details)
         edited = st.data_editor(
             edit_rows,
             hide_index=True,
