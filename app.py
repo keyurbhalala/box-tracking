@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_NZ = ZoneInfo("Pacific/Auckland")
+
+def _today_nz() -> date:
+    """Return today's date in NZ time (auto-handles NZST/NZDT)."""
+    return datetime.now(_NZ).date()
 
 import pandas as pd
 import plotly.express as px
@@ -187,19 +194,51 @@ def render_dashboard() -> None:
 
 def render_new_shipment() -> None:
     hero("New Shipment", "Record boxes by store in one quick entry")
-    groups = get_groups()
-    if groups.empty:
-        st.warning("Add an active group and stores before recording shipments.")
-        return
-    group_map = dict(zip(groups["group_name"], groups["id"]))
 
-    # Group selector is OUTSIDE the form so changing it immediately reloads stores
-    selected_group = st.selectbox("Group / Store", list(group_map))
-    stores = get_stores(int(group_map[selected_group]))
+    # ── Group mode toggle ────────────────────────────────────────────────────
+    group_mode = st.radio(
+        "Group selection",
+        ["Existing Group", "Custom Group"],
+        horizontal=True,
+        label_visibility="collapsed",
+        help=(
+            "Existing Group: pick a pre-defined store group.\n"
+            "Custom Group: hand-pick individual stores from any group for a one-off shipment."
+        ),
+    )
 
+    # ── Store resolution ─────────────────────────────────────────────────────
+    if group_mode == "Existing Group":
+        groups = get_groups()
+        if groups.empty:
+            st.warning("Add an active group and stores before recording shipments.")
+            return
+        group_map = dict(zip(groups["group_name"], groups["id"]))
+        selected_group = st.selectbox("Group / Store", list(group_map))
+        stores = get_stores(int(group_map[selected_group]))
+        editor_key = f"new_editor_{group_map[selected_group]}"
+
+    else:  # Custom Group
+        all_stores = get_stores()  # all active stores across all groups
+        if all_stores.empty:
+            st.warning("No active stores found.")
+            return
+        store_options = all_stores["store_name"].tolist()
+        selected_store_names = st.multiselect(
+            "Search & select stores",
+            options=store_options,
+            placeholder="Type to search for stores…",
+        )
+        if not selected_store_names:
+            st.info("Select at least one store to continue.")
+            return
+        stores = all_stores[all_stores["store_name"].isin(selected_store_names)].copy()
+        editor_key = f"new_editor_custom_{'_'.join(sorted(selected_store_names))}"
+
+    # ── Shipment form ─────────────────────────────────────────────────────────
     with st.form("new_shipment", clear_on_submit=False):
         c1, c2 = st.columns([1, 1])
-        shipment_date = c1.date_input("Shipment Date", value=date.today())
+        shipment_date = c1.date_input("Shipment Date", value=_today_nz())
         method = c2.selectbox("Shipment Method", ["", *METHODS], format_func=lambda x: "— Select method —" if x == "" else x)
         notes = st.text_area("Notes", placeholder="Optional reference or instructions")
         if stores.empty:
@@ -215,7 +254,7 @@ def render_new_shipment() -> None:
                     "Boxes", min_value=0, step=1, format="%d"
                 ),
             },
-            key=f"new_editor_{group_map[selected_group]}",
+            key=editor_key,
         )
         total = int(pd.to_numeric(editor["Boxes"], errors="coerce").fillna(0).sum())
         st.caption(f"Shipment total: **{total:,} boxes**")
@@ -251,7 +290,7 @@ def render_history() -> None:
     hero("Shipment History", "Filter, sort, export, edit, or delete records")
     stores = get_stores(active_only=False)
     groups = get_groups(active_only=False)
-    today = date.today()
+    today = _today_nz()
     preset = st.segmented_control(
         "Quick date range",
         ["This Week", "Last 7 Days", "This Month", "Last 30 Days", "Custom"],
@@ -370,7 +409,7 @@ def render_store_lookup() -> None:
         st.info("No shipments found for this store.")
         return
     df["Date"] = pd.to_datetime(df["Date"])
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(_today_nz())
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
         "Boxes Last 7 Days",
