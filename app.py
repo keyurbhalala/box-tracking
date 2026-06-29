@@ -324,9 +324,9 @@ def _build_courier_stores(
 
 def _print_label_button(pdf_bytes: bytes, key: str) -> None:
     """
-    Print button for Streamlit Cloud.
-    Opens a new browser tab with the PDF and triggers the OS print dialog.
-    Uses window.parent.open() to escape Streamlit's sandboxed component iframe.
+    Opens the label PDF in a new browser tab.
+    The browser's built-in PDF viewer has a print button — user selects printer there.
+    Uses a programmatic link click (not window.open) so it's never popup-blocked.
     """
     import base64, hashlib
     b64 = base64.b64encode(pdf_bytes).decode()
@@ -336,30 +336,26 @@ def _print_label_button(pdf_bytes: bytes, key: str) -> None:
       #btn_{uid} {{
         background:#1a7f5a; color:#fff; border:none; border-radius:6px;
         padding:6px 14px; font-size:14px; cursor:pointer; width:100%;
-        font-family:sans-serif; font-weight:500; letter-spacing:0.02em;
+        font-family:sans-serif; font-weight:500;
       }}
       #btn_{uid}:hover {{ background:#145f44; }}
     </style>
-    <button id="btn_{uid}" onclick="
-      var b64 = '{b64}';
-      var byteChars = atob(b64);
-      var byteNums = new Uint8Array(byteChars.length);
-      for (var i = 0; i < byteChars.length; i++) {{
-        byteNums[i] = byteChars.charCodeAt(i);
-      }}
-      var blob = new Blob([byteNums], {{type: 'application/pdf'}});
-      var url = URL.createObjectURL(blob);
-      var win = window.parent.open(url, '_blank');
-      if (win) {{
-        win.onload = function() {{
-          setTimeout(function() {{ win.print(); }}, 500);
-        }};
-      }} else {{
-        window.parent.open(url, '_blank');
-      }}
-    ">🖨 Print Label</button>
+    <button id="btn_{uid}" onclick="(function(){{
+      var b64='{b64}';
+      var raw=atob(b64);
+      var arr=new Uint8Array(raw.length);
+      for(var i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+      var blob=new Blob([arr],{{type:'application/pdf'}});
+      var url=URL.createObjectURL(blob);
+      var a=document.createElement('a');
+      a.href=url; a.target='_blank'; a.rel='noopener';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function(){{URL.revokeObjectURL(url);}},10000);
+    }})()">🖨 Print Label</button>
     """
-    st.components.v1.html(html, height=40)
+    st.components.v1.html(html, height=42)
 
 
 def _render_courier_results(shipment_id: int, results: list) -> None:
