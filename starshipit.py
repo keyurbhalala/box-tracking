@@ -256,15 +256,16 @@ def _submit_for_label(
         "order_id": int(order_id),
         "reprint":  reprint,
     }
-    # When order_id is provided, Starshipit already knows the carrier and
-    # service_code from the existing order.  Sending carrier_service_code
-    # causes Starshipit to concatenate it with the stored value → "NZREG,NZREG"
-    # error.  Only include carrier (not service_code) if explicitly needed.
+    # The order already has package details from POST /api/orders creation.
+    # Sending packages again causes Starshipit to apply the service_code once
+    # per package entry → "NZREG,NZREG" for a 2-box shipment.
+    # Solution: send carrier + carrier_service_code to identify the product,
+    # but NO packages — Starshipit uses what's already on the order.
     if carrier:
         body["carrier"] = carrier
-    # DO NOT send carrier_service_code — omit it entirely.
-    if expanded:
-        body["packages"] = expanded
+    if service_code:
+        body["carrier_service_code"] = service_code
+    # Intentionally omit "packages" — already stored on the order.
 
     try:
         resp = requests.post(
