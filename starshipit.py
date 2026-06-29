@@ -329,8 +329,10 @@ def create_order(
             label_pdf  = b""
             label_error = ""
             if order_id:
+                # Use the caller-supplied service_code (default CPOLP) — confirmed
+                # as the correct NZ Post CourierPost product code for this account.
                 label_pdf, label_error = _submit_for_label(
-                    order_id, reprint=False, carrier_service_code=actual_svc
+                    order_id, reprint=False, carrier_service_code=service_code
                 )
                 if label_error:
                     log.warning("Label generation failed for %s: %s", reference, label_error)
