@@ -314,17 +314,21 @@ def _build_courier_stores(
 
     # ── Generate printable labels for all successfully booked stores ──────────
     booked_results = [r for r in results if r.success and r.consignment_id]
+    # Clear previous label state
+    st.session_state.pop("_label_pdf_bytes", None)
+    st.session_state.pop("_label_url", None)
     if booked_results:
         from starshipit import generate_labels
         order_ids = [r.consignment_id for r in booked_results]
         label_progress = st.progress(0, text="Generating labels…")
-        combined_label_url, label_err = generate_labels(order_ids)
+        label_result, label_err = generate_labels(order_ids)
         label_progress.empty()
-        if combined_label_url:
-            st.session_state["_last_combined_label_url"] = combined_label_url
-        elif label_err:
+        if isinstance(label_result, bytes) and label_result:
+            st.session_state["_label_pdf_bytes"] = label_result
+        elif isinstance(label_result, str) and label_result:
+            st.session_state["_label_url"] = label_result
+        else:
             log.warning("Label generation failed: %s", label_err)
-            st.session_state.pop("_last_combined_label_url", None)
 
     return results
 
@@ -348,23 +352,22 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
             "Use **Retry** in Shipment History to rebook."
         )
 
-    # ── Combined "Print All Labels" button ────────────────────────────────────
-    combined_url = st.session_state.get("_last_combined_label_url", "")
-    if combined_url and booked:
-        st.link_button(
-            f"🖨 Print All Labels ({len(booked)} store{'s' if len(booked) != 1 else ''})",
-            combined_url,
+    # ── Combined label download/print button ──────────────────────────────────
+    label_pdf  = st.session_state.get("_label_pdf_bytes")
+    label_url  = st.session_state.get("_label_url", "")
+    n_booked   = len(booked)
+    btn_label  = f"🖨 Download Labels ({n_booked} store{'s' if n_booked != 1 else ''})"
+    if label_pdf and booked:
+        st.download_button(
+            btn_label,
+            data=label_pdf,
+            file_name="shipment_labels.pdf",
+            mime="application/pdf",
             type="primary",
             use_container_width=True,
         )
-    elif booked:
-        # Labels endpoint didn't return a combined URL — fall back to per-store
-        individual_urls = [r.label_url for r in booked if r.label_url]
-        if individual_urls:
-            st.info(
-                "Labels available individually below. "
-                "Click each store's 🖨 Label button to open."
-            )
+    elif label_url and booked:
+        st.link_button(btn_label, label_url, type="primary", use_container_width=True)
 
     for r in results:
         with st.container(border=True):
@@ -376,8 +379,8 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                 link_col1, link_col2 = c4.columns(2)
                 if r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
-                elif combined_url:
-                    link_col1.link_button("🖨 Labels", combined_url, use_container_width=True)
+                elif label_url:
+                    link_col1.link_button("🖨 Labels", label_url, use_container_width=True)
                 if r.tracking_number:
                     link_col2.link_button("📦 Track", tracking_url(r.tracking_number), use_container_width=True)
             else:

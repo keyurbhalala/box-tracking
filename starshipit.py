@@ -306,19 +306,18 @@ def tracking_url(tracking_number: str) -> str:
     return NZ_POST_TRACKING_URL.format(tracking_number)
 
 
-def generate_labels(order_ids: list[str]) -> tuple[str, str]:
+def generate_labels(order_ids: list[str]) -> tuple[bytes | str, str]:
     """
     Request Starshipit to generate printable label PDFs for the given order IDs.
 
-    Starshipit requires a separate POST /api/labels call after order creation —
-    the order creation endpoint does not always return a ready-to-print label URL.
+    Returns one of:
+        (bytes, "")   — raw PDF bytes; caller should use st.download_button
+        (str,  "")    — a URL string; caller should use st.link_button
+        ("",   msg)   — failure; msg describes the error
 
-    Args:
-        order_ids: Starshipit order IDs (as strings) from BookingResult.consignment_id
-
-    Returns:
-        (label_url, error_message) — label_url is a combined PDF URL if successful,
-        empty string on failure; error_message is empty on success.
+    Starshipit's /api/labels endpoint may return either raw PDF bytes or a JSON
+    envelope with a URL — we handle both.  We try GET first (which Starshipit
+    documents as the download path), then POST as fallback.
     """
     if not order_ids:
         return "", "No order IDs provided"
@@ -328,39 +327,69 @@ def generate_labels(order_ids: list[str]) -> tuple[str, str]:
         return "", "No valid order IDs"
 
     log.info("Starshipit generate_labels for order_ids=%s", clean_ids)
+    ids_param = ",".join(clean_ids)
+
+    def _parse_response(resp: "requests.Response") -> tuple[bytes | str, str]:
+        """Try to extract a label from a response — PDF bytes or URL."""
+        ct = resp.headers.get("Content-Type", "")
+        if resp.ok:
+            if "application/pdf" in ct or resp.content[:4] == b"%PDF":
+                # Raw PDF bytes — caller will offer a download button
+                return resp.content, ""
+            # Try JSON envelope
+            try:
+                data = resp.json()
+                if data.get("success") or resp.ok:
+                    url = (
+                        data.get("url")
+                        or data.get("label_url")
+                        or data.get("labels_url")
+                        or ""
+                    )
+                    if not url and data.get("labels"):
+                        lbls = data["labels"]
+                        if isinstance(lbls, list) and lbls:
+                            url = lbls[0].get("url") or lbls[0].get("label_url") or ""
+                    if url:
+                        return url, ""
+                errors = data.get("errors") or []
+                msg = (
+                    "; ".join(e.get("description", str(e)) for e in errors)
+                    if errors
+                    else data.get("message", "Unknown response from Starshipit")
+                )
+                return "", msg
+            except Exception:
+                pass
+        return "", f"HTTP {resp.status_code}"
+
+    headers = _headers()
     try:
-        resp = requests.post(
+        # ── Attempt 1: GET /api/labels?order_ids=... ─────────────────────────
+        resp = requests.get(
             f"{STARSHIPIT_API_BASE}/labels",
-            headers=_headers(),
+            headers=headers,
+            params={"order_ids": ids_param},
+            timeout=30,
+        )
+        log.debug("Starshipit GET labels [%s] ct=%s", resp.status_code, resp.headers.get("Content-Type"))
+        result, err = _parse_response(resp)
+        if result:
+            return result, ""
+
+        # ── Attempt 2: POST /api/labels {order_ids: [...]} ───────────────────
+        resp2 = requests.post(
+            f"{STARSHIPIT_API_BASE}/labels",
+            headers=headers,
             json={"order_ids": [int(oid) for oid in clean_ids]},
             timeout=30,
         )
-        raw = resp.text
-        log.debug("Starshipit labels response [%s]: %.500s", resp.status_code, raw)
-        data = resp.json()
+        log.debug("Starshipit POST labels [%s] ct=%s", resp2.status_code, resp2.headers.get("Content-Type"))
+        result2, err2 = _parse_response(resp2)
+        if result2:
+            return result2, ""
 
-        if resp.ok and data.get("success"):
-            # Starshipit returns the combined label PDF URL under various keys
-            url = (
-                data.get("url")
-                or data.get("label_url")
-                or data.get("labels_url")
-                or ""
-            )
-            # Some versions return a list of label objects
-            if not url and data.get("labels"):
-                labels = data["labels"]
-                if isinstance(labels, list) and labels:
-                    url = labels[0].get("url") or labels[0].get("label_url") or ""
-            return url, ""
-
-        errors = data.get("errors") or []
-        msg = (
-            "; ".join(e.get("description", str(e)) for e in errors)
-            if errors
-            else data.get("message", f"HTTP {resp.status_code}")
-        )
-        return "", msg
+        return "", err2 or err or "No label returned by Starshipit"
 
     except requests.exceptions.Timeout:
         return "", "Label request timed out (30 s)"

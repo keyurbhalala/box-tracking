@@ -1001,9 +1001,12 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
     label_url = result.label_url or ""
     if result.success and result.consignment_id:
         from starshipit import generate_labels
-        gen_url, gen_err = generate_labels([result.consignment_id])
-        if gen_url:
-            label_url = gen_url
+        gen_result, _gen_err = generate_labels([result.consignment_id])
+        if isinstance(gen_result, str) and gen_result:
+            # Got a URL — store it directly
+            label_url = gen_result
+        # If bytes: we can't store binary in the DB label_url column; skip
+        # (user can print from Starshipit web UI in this case)
 
     with connection() as conn:
         conn.execute(
