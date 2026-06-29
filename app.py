@@ -1494,23 +1494,17 @@ def render_starshipit_diagnostics() -> None:
         "`SERVICE_OPTIONS` in `starshipit.py` accordingly."
     )
 
-    t_col1, t_col2, t_col3 = st.columns(3)
-    test_order_id = t_col1.text_input("Starshipit order_id (numeric)", value=chosen_id if not recent.empty else "")
-    test_carrier  = t_col2.text_input("Carrier (from order details)", value="NZ Post")
-    test_svc_code = t_col3.text_input("carrier_service_code to try", value="")
+    test_order_id = st.text_input("Starshipit order_id (numeric)", value=chosen_id if not recent.empty else "")
+    st.caption("We'll call POST /api/orders/shipment with just the order_id — no carrier/service override.")
 
     if st.button("Test Label Endpoint", disabled=not test_order_id):
         with st.spinner("Calling POST /api/orders/shipment…"):
-            pdf, err = _submit_for_label(
-                test_order_id, test_carrier, test_svc_code, [], reprint=False
-            )
+            pdf, err = _submit_for_label(test_order_id, reprint=False)
         if pdf:
-            st.success(f"✅ Label generated! ({len(pdf):,} bytes) — this `carrier_service_code` is correct.")
+            st.success(f"✅ Label generated! ({len(pdf):,} bytes)")
             st.download_button("Download Test Label", data=pdf, file_name="test_label.pdf", mime="application/pdf")
-            st.info(f"Update `SERVICE_OPTIONS` in `starshipit.py` — replace NZREG with `{test_svc_code}`")
         else:
             st.error(f"❌ {err}")
-            st.caption("Try a different carrier_service_code.")
 
 
 PAGES = {
