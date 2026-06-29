@@ -1622,189 +1622,139 @@ def _get_pins() -> tuple[str, str]:
 
 def _render_pin_screen() -> None:
     """
-    Touch-friendly PIN pad. Communication path:
-      Component JS  →  postMessage(role)  →  window listener (injected via st.markdown)
-      →  sets bridge text_input value  →  Python reads it on next rerun.
-    This bypasses the iframe sandbox that blocks window.parent.document access.
+    Pure-Python PIN pad. All logic in Python session_state — no JS bridge.
+    CSS forces Streamlit's column layout to stay as a 3-column grid on mobile
+    (overrides the flex-direction:column responsive breakpoint with grid).
     """
     admin_pin, general_pin = _get_pins()
 
-    # ── Hide Streamlit chrome ─────────────────────────────────────────────────
+    if "_pin_digits" not in st.session_state:
+        st.session_state["_pin_digits"] = ""
+
+    pin_val = st.session_state["_pin_digits"]
+
+    # ── CSS ───────────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
       [data-testid="stSidebar"], header, footer { display: none !important; }
-      .stApp > div { padding-top: 0 !important; }
-      div[data-testid="stTextInput"] {
-        position: fixed; top: -300px; opacity: 0; pointer-events: none;
+
+      /* Constrain and centre the whole page */
+      .main .block-container {
+        max-width: 320px !important;
+        padding-top: 32px !important;
+        margin: 0 auto !important;
+      }
+
+      /* Force Streamlit columns to always stay as 3 equal columns.
+         Overrides the media-query that stacks them vertically on narrow screens. */
+      div[data-testid="stHorizontalBlock"] {
+        display: grid !important;
+        grid-template-columns: repeat(3, 1fr) !important;
+        gap: 10px !important;
+        flex-direction: unset !important;
+        align-items: stretch !important;
+      }
+      div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+        width: auto !important;
+        flex: unset !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+      }
+
+      /* Digit key buttons */
+      div[data-testid="stColumn"] div[data-testid="stButton"] > button {
+        height: 72px !important;
+        font-size: 28px !important;
+        font-weight: 600 !important;
+        border-radius: 14px !important;
+        background: #1e2d3d !important;
+        border: 1.5px solid #2e4057 !important;
+        color: #e8e8e8 !important;
+        padding: 0 !important;
+        line-height: 1 !important;
+        width: 100% !important;
+      }
+      div[data-testid="stColumn"] div[data-testid="stButton"] > button:hover {
+        background: #26405a !important;
+        border-color: #3a5a80 !important;
+        color: #fff !important;
+      }
+      div[data-testid="stColumn"] div[data-testid="stButton"] > button:active {
+        background: #1a7f5a !important;
+        border-color: #1a7f5a !important;
+        transform: scale(.92) !important;
       }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── postMessage listener injected into the MAIN Streamlit frame ───────────
-    # This runs in the top-level page (not inside the component iframe),
-    # so it CAN safely access the bridge input DOM element.
+    # ── Header ────────────────────────────────────────────────────────────────
     st.markdown("""
-    <script>
-    (function() {
-      if (window._pinListener) window.removeEventListener('message', window._pinListener);
-      window._pinListener = function(e) {
-        var role = e.data && e.data.pinRole;
-        if (role !== 'admin' && role !== 'general') return;
-        var inputs = document.querySelectorAll('input[type="text"]');
-        for (var i = 0; i < inputs.length; i++) {
-          var inp = inputs[i];
-          var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-          setter.call(inp, role);
-          inp.dispatchEvent(new Event('input', {bubbles: true}));
-          break;
-        }
-      };
-      window.addEventListener('message', window._pinListener);
-    })();
-    </script>
+    <div style='text-align:center;margin-bottom:16px'>
+      <div style='font-size:46px;margin-bottom:6px'>📦</div>
+      <h2 style='margin:0 0 4px;color:#e8e8e8'>Shipment Tracker</h2>
+      <p style='color:#999;font-size:14px;margin:0'>Enter your PIN to continue</p>
+    </div>
     """, unsafe_allow_html=True)
 
-    # ── Bridge input — in the main frame, reads the role set by the listener ──
-    bridge = st.text_input("_bridge", key="_pin_bridge", label_visibility="collapsed")
-    if bridge in ("admin", "general"):
-        st.session_state["pin_role"] = bridge
-        st.session_state["_pin_bridge"] = ""
-        st.rerun()
+    # ── Dot indicators ────────────────────────────────────────────────────────
+    n = len(pin_val)
+    dot = lambda filled: (
+        '<div style="width:22px;height:22px;border-radius:50%;'
+        + ('background:#1a7f5a;border:2px solid #1a7f5a' if filled else 'background:#2a2a2a;border:2px solid #555')
+        + ';transition:background .15s"></div>'
+    )
+    st.markdown(
+        '<div style="display:flex;gap:20px;justify-content:center;margin:20px 0 16px">'
+        + "".join(dot(i < n) for i in range(4))
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
-    # ── HTML PIN pad component ────────────────────────────────────────────────
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<style>
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-  background: transparent;
-  display: flex; flex-direction: column; align-items: center;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  padding: 16px;
-}}
-.logo  {{ font-size: 40px; margin: 12px 0 4px; }}
-.title {{ font-size: 22px; font-weight: 700; color: #e8e8e8; margin-bottom: 4px; }}
-.sub   {{ font-size: 14px; color: #999; margin-bottom: 28px; }}
-.dots  {{ display: flex; gap: 20px; margin-bottom: 28px; }}
-.dot   {{
-  width: 22px; height: 22px; border-radius: 50%;
-  background: #2a2a2a; border: 2px solid #555;
-  transition: background .15s, border-color .15s;
-}}
-.dot.on  {{ background: #1a7f5a; border-color: #1a7f5a; }}
-.dot.err {{ background: #c0392b; border-color: #c0392b; }}
-.grid {{
-  display: grid;
-  grid-template-columns: repeat(3, 88px);
-  gap: 10px;
-  margin-bottom: 10px;
-}}
-.key {{
-  height: 72px; border-radius: 16px;
-  border: 1.5px solid #2e4057; background: #1e2d3d;
-  color: #e8e8e8; font-size: 28px; font-weight: 600;
-  cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  -webkit-tap-highlight-color: transparent; user-select: none;
-  transition: background .1s, transform .08s;
-  touch-action: manipulation;
-}}
-.key:active {{ background: #1a7f5a; transform: scale(.91); }}
-.key.del    {{ background: #2c1a1a; border-color: #4a2020; font-size: 22px; }}
-.key.del:active {{ background: #7f1a1a; }}
-.key.blank  {{ background: transparent; border-color: transparent; pointer-events: none; }}
-.enter {{
-  width: 286px; height: 56px; border-radius: 14px;
-  background: #1a7f5a; border: none;
-  color: #fff; font-size: 18px; font-weight: 600;
-  cursor: pointer; margin-top: 8px;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation; display: none;
-  transition: background .1s;
-}}
-.enter:active {{ background: #145f44; }}
-.enter.show {{ display: block; }}
-.err-msg {{ margin-top: 12px; font-size: 14px; color: #f55; min-height: 20px; text-align: center; }}
-</style>
-</head>
-<body>
-<div class="logo">📦</div>
-<div class="title">Shipment Tracker</div>
-<div class="sub">Enter your PIN to continue</div>
-<div class="dots">
-  <div class="dot" id="d0"></div><div class="dot" id="d1"></div>
-  <div class="dot" id="d2"></div><div class="dot" id="d3"></div>
-</div>
-<div class="grid">
-  <div class="key" onclick="pk('1')">1</div>
-  <div class="key" onclick="pk('2')">2</div>
-  <div class="key" onclick="pk('3')">3</div>
-  <div class="key" onclick="pk('4')">4</div>
-  <div class="key" onclick="pk('5')">5</div>
-  <div class="key" onclick="pk('6')">6</div>
-  <div class="key" onclick="pk('7')">7</div>
-  <div class="key" onclick="pk('8')">8</div>
-  <div class="key" onclick="pk('9')">9</div>
-  <div class="key blank"></div>
-  <div class="key" onclick="pk('0')">0</div>
-  <div class="key del" onclick="pdel()">⌫</div>
-</div>
-<button class="enter" id="enterBtn" onclick="check()">✓ Enter</button>
-<div class="err-msg" id="errmsg"></div>
+    # ── Error / spacer ────────────────────────────────────────────────────────
+    if st.session_state.get("_pin_error"):
+        st.error("✗ Incorrect PIN — try again")
+        st.session_state["_pin_error"] = False
+    else:
+        st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
 
-<script>
-var pin = '';
-var ADMIN   = '{admin_pin}';
-var GENERAL = '{general_pin}';
+    # ── Digit buttons ─────────────────────────────────────────────────────────
+    def press(d: str) -> None:
+        if len(st.session_state["_pin_digits"]) < 4:
+            st.session_state["_pin_digits"] += d
 
-function pk(d) {{
-  if (pin.length >= 4) return;
-  pin += d;
-  updateDots();
-  // Show Enter button when 4 digits entered
-  document.getElementById('enterBtn').className = pin.length === 4 ? 'enter show' : 'enter';
-}}
-function pdel() {{
-  pin = pin.slice(0, -1);
-  updateDots();
-  document.getElementById('errmsg').textContent = '';
-  document.getElementById('enterBtn').className = pin.length === 4 ? 'enter show' : 'enter';
-}}
-function updateDots() {{
-  for (var i = 0; i < 4; i++) {{
-    document.getElementById('d' + i).className = 'dot' + (i < pin.length ? ' on' : '');
-  }}
-}}
-function check() {{
-  if (pin.length < 4) return;
-  var role = '';
-  if (pin === ADMIN)   role = 'admin';
-  if (pin === GENERAL) role = 'general';
+    for row in [("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9")]:
+        cols = st.columns(3)
+        for col, digit in zip(cols, row):
+            if col.button(digit, key=f"pk{digit}", use_container_width=True):
+                press(digit)
 
-  if (role) {{
-    document.getElementById('enterBtn').textContent = '⏳';
-    // postMessage to parent — works even through iframe sandbox restrictions
-    window.parent.postMessage({{ pinRole: role }}, '*');
-  }} else {{
-    for (var i = 0; i < 4; i++) {{
-      document.getElementById('d' + i).className = 'dot err';
-    }}
-    document.getElementById('errmsg').textContent = '✗ Incorrect PIN — try again';
-    document.getElementById('enterBtn').className = 'enter';
-    setTimeout(function() {{
-      pin = '';
-      updateDots();
-      document.getElementById('errmsg').textContent = '';
-    }}, 800);
-  }}
-}}
-</script>
-</body>
-</html>"""
+    # Last row: blank | 0 | ⌫
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("")
+    if c2.button("0", key="pk0", use_container_width=True):
+        press("0")
+    if c3.button("⌫", key="pkdel", use_container_width=True):
+        st.session_state["_pin_digits"] = st.session_state["_pin_digits"][:-1]
 
-    st.components.v1.html(html, height=580, scrolling=False)
+    # ── Enter button ──────────────────────────────────────────────────────────
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    if st.button(
+        "✓  Enter",
+        key="pkenter",
+        use_container_width=True,
+        type="primary",
+        disabled=len(st.session_state["_pin_digits"]) < 4,
+    ):
+        p = st.session_state["_pin_digits"]
+        if p == admin_pin:
+            st.session_state.update({"pin_role": "admin", "_pin_digits": ""})
+            st.rerun()
+        elif p == general_pin:
+            st.session_state.update({"pin_role": "general", "_pin_digits": ""})
+            st.rerun()
+        else:
+            st.session_state.update({"_pin_error": True, "_pin_digits": ""})
+            st.rerun()
 
 
 # ── Main app (post-login) ─────────────────────────────────────────────────────
