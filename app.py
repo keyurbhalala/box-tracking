@@ -324,32 +324,40 @@ def _build_courier_stores(
 
 def _print_label_button(pdf_bytes: bytes, key: str) -> None:
     """
-    Renders a 'Print Label' button that opens the browser's print dialog.
-    Works on Streamlit Cloud — uses JS to embed the PDF and call window.print().
-    The user can then select any printer installed on their computer.
+    Print button for Streamlit Cloud.
+    Opens a new browser tab with the PDF and triggers the OS print dialog.
+    Uses window.parent.open() to escape Streamlit's sandboxed component iframe.
     """
     import base64, hashlib
     b64 = base64.b64encode(pdf_bytes).decode()
-    # Use a short hash as the iframe/button id so multiple buttons on screen don't clash
     uid = hashlib.md5(key.encode()).hexdigest()[:8]
     html = f"""
     <style>
       #btn_{uid} {{
         background:#1a7f5a; color:#fff; border:none; border-radius:6px;
         padding:6px 14px; font-size:14px; cursor:pointer; width:100%;
-        font-family:sans-serif; font-weight:500;
+        font-family:sans-serif; font-weight:500; letter-spacing:0.02em;
       }}
       #btn_{uid}:hover {{ background:#145f44; }}
     </style>
     <button id="btn_{uid}" onclick="
-      var frame = document.getElementById('pdf_{uid}');
-      frame.src = 'data:application/pdf;base64,{b64}';
-      frame.onload = function() {{
-        frame.contentWindow.focus();
-        frame.contentWindow.print();
-      }};
+      var b64 = '{b64}';
+      var byteChars = atob(b64);
+      var byteNums = new Uint8Array(byteChars.length);
+      for (var i = 0; i < byteChars.length; i++) {{
+        byteNums[i] = byteChars.charCodeAt(i);
+      }}
+      var blob = new Blob([byteNums], {{type: 'application/pdf'}});
+      var url = URL.createObjectURL(blob);
+      var win = window.parent.open(url, '_blank');
+      if (win) {{
+        win.onload = function() {{
+          setTimeout(function() {{ win.print(); }}, 500);
+        }};
+      }} else {{
+        window.parent.open(url, '_blank');
+      }}
     ">🖨 Print Label</button>
-    <iframe id="pdf_{uid}" style="display:none" width="0" height="0"></iframe>
     """
     st.components.v1.html(html, height=40)
 
