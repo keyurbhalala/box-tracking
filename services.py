@@ -609,6 +609,201 @@ def save_signature(
             )
 
 
+# ---------------------------------------------------------------------------
+# Starshipit / Courier booking
+# ---------------------------------------------------------------------------
+
+
+def get_warehouse() -> dict[str, Any]:
+    """Return the warehouse sender details from warehouse_settings."""
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM warehouse_settings ORDER BY id LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+def get_store_with_address(store_id: int) -> dict[str, Any] | None:
+    """Return a store record including all address fields."""
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, store_name, group_name,
+                   contact_name, phone, email,
+                   address_line1, address_line2,
+                   suburb, city, postcode, country
+            FROM stores WHERE id = ?
+            """,
+            (store_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def save_courier_booking(
+    shipment_id: int,
+    store_id: int,
+    store_name: str,
+    boxes: int,
+    weight_per_box: float,
+    length: float,
+    width: float,
+    height: float,
+    service_code: str,
+    result: Any,  # starshipit.BookingResult
+) -> int:
+    """
+    Persist a courier booking result to courier_bookings.
+    Returns the new row id.
+    """
+    with connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO courier_bookings
+                (shipment_id, store_id, store_name, boxes,
+                 weight_per_box, length, width, height, service_code,
+                 tracking_number, label_url, consignment_id,
+                 carrier, booking_status, booked_at,
+                 api_response, api_error, retry_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            RETURNING id
+            """,
+            (
+                shipment_id, store_id, store_name, boxes,
+                weight_per_box, length, width, height, service_code,
+                result.tracking_number or None,
+                result.label_url or None,
+                result.consignment_id or None,
+                result.carrier or None,
+                result.booking_status,
+                result.booked_at or None,
+                (result.api_response or "")[:10_000] or None,
+                (result.error or "")[:2_000] or None,
+            ),
+        ).fetchone()
+        booking_id = row["id"]
+        audit(
+            conn, "courier_booking", booking_id, "CREATE",
+            new_values={
+                "shipment_id": shipment_id,
+                "store_name": store_name,
+                "status": result.booking_status,
+                "tracking": result.tracking_number,
+            },
+        )
+    return booking_id
+
+
+def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
+    """
+    Retry a failed courier booking.
+
+    Updates the existing courier_bookings row — never inserts a duplicate.
+    Returns (success, tracking_number_or_error_message).
+    """
+    from starshipit import create_order, Address, Package
+
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM courier_bookings WHERE id = ?", (booking_id,)
+        ).fetchone()
+        if not row:
+            return False, "Booking record not found."
+        if row["booking_status"] == "Booked":
+            return False, "Already successfully booked."
+        booking = dict(row)
+
+    store    = get_store_with_address(booking["store_id"])
+    warehouse = get_warehouse()
+
+    if not store or not store.get("address_line1"):
+        return False, f"No address configured for store '{booking['store_name']}'."
+    if not warehouse:
+        return False, "Warehouse settings not found in database."
+
+    sender = Address(
+        name=warehouse.get("warehouse_name", "Shosha Warehouse"),
+        phone=warehouse.get("phone", ""),
+        street=warehouse.get("address_line1", ""),
+        suburb=warehouse.get("suburb", ""),
+        city=warehouse.get("city", ""),
+        postcode=warehouse.get("postcode", ""),
+        country=warehouse.get("country", "NZ"),
+        email=warehouse.get("email", ""),
+    )
+    recipient = Address(
+        name=store.get("contact_name") or store["store_name"],
+        phone=store.get("phone") or "",
+        street=store.get("address_line1") or "",
+        suburb=store.get("suburb") or "",
+        city=store.get("city") or "",
+        postcode=store.get("postcode") or "",
+        country=store.get("country", "NZ"),
+        email=store.get("email") or "",
+        building=store.get("address_line2") or "",
+    )
+    pkg = Package(
+        boxes=booking["boxes"],
+        weight_per_box=booking["weight_per_box"] or 1.0,
+        length=booking["length"] or 30.0,
+        width=booking["width"] or 20.0,
+        height=booking["height"] or 15.0,
+    )
+    ref = f"SHP-{booking['shipment_id']}-{booking['store_id']}"
+    svc = booking.get("service_code") or "NZREG"
+
+    result = create_order(sender, recipient, pkg, ref, svc)
+
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE courier_bookings
+            SET tracking_number = ?, label_url     = ?, consignment_id = ?,
+                carrier         = ?, service_code  = ?, booking_status  = ?,
+                booked_at       = ?, api_response  = ?, api_error       = ?,
+                retry_count     = retry_count + 1
+            WHERE id = ?
+            """,
+            (
+                result.tracking_number or None,
+                result.label_url or None,
+                result.consignment_id or None,
+                result.carrier or None,
+                result.service_code or None,
+                result.booking_status,
+                result.booked_at or None,
+                (result.api_response or "")[:10_000] or None,
+                (result.error or "")[:2_000] or None,
+                booking_id,
+            ),
+        )
+        audit(
+            conn, "courier_booking", booking_id, "RETRY",
+            new_values={
+                "status": result.booking_status,
+                "tracking": result.tracking_number,
+                "error": result.error,
+            },
+        )
+
+    return result.success, result.tracking_number or result.error
+
+
+def get_courier_bookings(shipment_id: int) -> pd.DataFrame:
+    """Return all courier bookings for a shipment, latest retry per store."""
+    return query_df(
+        """
+        SELECT id, store_name, boxes,
+               tracking_number, label_url, carrier,
+               service_code, booking_status, booked_at,
+               api_error, retry_count, consignment_id
+        FROM courier_bookings
+        WHERE shipment_id = ?
+        ORDER BY store_name
+        """,
+        (shipment_id,),
+    )
+
+
 def audit_history(limit: int = 500) -> pd.DataFrame:
     return query_df(
         """

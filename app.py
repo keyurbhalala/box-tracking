@@ -25,13 +25,18 @@ from services import (
     delete_group,
     delete_shipment,
     delete_store,
+    get_courier_bookings,
     get_delivery_details,
     get_delivery_runs,
     get_groups,
     get_shipment,
     get_stores,
+    get_store_with_address,
+    get_warehouse,
     history,
     pallet_lookup,
+    retry_courier_booking,
+    save_courier_booking,
     save_signature,
     trend_data,
     update_group,
@@ -192,10 +197,124 @@ def render_dashboard() -> None:
     )
 
 
+def _build_courier_stores(
+    shipment_id: int,
+    details: list[dict],
+    pkg_info: dict,
+) -> list:
+    """
+    Book a Starshipit consignment for each store and save results.
+    Returns a list of BookingResult objects.
+    """
+    from starshipit import create_order, Address, Package, BookingResult
+
+    warehouse = get_warehouse()
+    if not warehouse or not warehouse.get("address_line1"):
+        error_msg = "Warehouse address not configured. Please set it up in the database."
+        st.error(error_msg)
+        return []
+
+    sender = Address(
+        name=warehouse.get("warehouse_name", "Shosha Warehouse"),
+        phone=warehouse.get("phone", ""),
+        street=warehouse.get("address_line1", ""),
+        suburb=warehouse.get("suburb", ""),
+        city=warehouse.get("city", ""),
+        postcode=warehouse.get("postcode", ""),
+        country=warehouse.get("country", "NZ"),
+        email=warehouse.get("email", ""),
+    )
+
+    results: list = []
+    progress = st.progress(0, text="Booking couriers with Starshipit…")
+
+    for i, d in enumerate(details):
+        store = get_store_with_address(d["store_id"])
+
+        if not store or not store.get("address_line1"):
+            from starshipit import BookingResult
+            r = BookingResult(
+                success=False,
+                store_name=d["store_name"],
+                boxes=d["boxes"],
+                booking_status="Failed",
+                error="No delivery address on file for this store.",
+            )
+        else:
+            recipient = Address(
+                name=store.get("contact_name") or store["store_name"],
+                phone=store.get("phone") or "",
+                street=store.get("address_line1") or "",
+                suburb=store.get("suburb") or "",
+                city=store.get("city") or "",
+                postcode=store.get("postcode") or "",
+                country=store.get("country", "NZ"),
+                email=store.get("email") or "",
+                building=store.get("address_line2") or "",
+            )
+            pkg = Package(
+                boxes=d["boxes"],
+                weight_per_box=pkg_info["weight"],
+                length=pkg_info["length"],
+                width=pkg_info["width"],
+                height=pkg_info["height"],
+            )
+            ref = f"SHP-{shipment_id}-{d['store_id']}"
+            r = create_order(sender, recipient, pkg, ref, pkg_info["service_code"])
+
+        save_courier_booking(
+            shipment_id, d["store_id"], d["store_name"], d["boxes"],
+            pkg_info["weight"], pkg_info["length"], pkg_info["width"], pkg_info["height"],
+            pkg_info["service_code"], r,
+        )
+        results.append(r)
+        progress.progress((i + 1) / len(details), text=f"Booked {d['store_name']}…")
+
+    progress.empty()
+    return results
+
+
+def _render_courier_results(shipment_id: int, results: list) -> None:
+    """Display the per-store courier booking results table."""
+    from starshipit import tracking_url, SERVICE_OPTIONS
+
+    booked = [r for r in results if r.success]
+    failed = [r for r in results if not r.success]
+
+    st.divider()
+    if booked:
+        st.success(
+            f"✅ Shipment #{shipment_id} saved. "
+            f"{len(booked)} courier booking{'s' if len(booked) != 1 else ''} confirmed with Starshipit."
+        )
+    if failed:
+        st.warning(
+            f"⚠️ {len(failed)} store{'s' if len(failed) != 1 else ''} could not be booked. "
+            "Use **Retry** in Shipment History to rebook."
+        )
+
+    for r in results:
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([3, 3, 2, 2])
+            c1.markdown(f"**{r.store_name}**  \n{r.boxes} box{'es' if r.boxes != 1 else ''}")
+            if r.success:
+                c2.code(r.tracking_number, language=None)
+                c3.markdown(f"{r.carrier}  \n`{r.service_code}`")
+                link_col1, link_col2 = c4.columns(2)
+                if r.label_url:
+                    link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
+                if r.tracking_number:
+                    link_col2.link_button("📦 Track", tracking_url(r.tracking_number), use_container_width=True)
+            else:
+                c2.error(r.error[:120] if r.error else "Unknown error")
+                c3.markdown("—")
+                c4.markdown("—")
+
+
 def render_new_shipment() -> None:
     hero("New Shipment", "Record boxes by store in one quick entry")
 
-    # ── Group mode toggle ────────────────────────────────────────────────────
+    # ── Group mode toggle (outside form — updates UI immediately) ────────────
     group_mode = st.radio(
         "Group selection",
         ["Existing Group", "Custom Group"],
@@ -219,7 +338,7 @@ def render_new_shipment() -> None:
         editor_key = f"new_editor_{group_map[selected_group]}"
 
     else:  # Custom Group
-        all_stores = get_stores()  # all active stores across all groups
+        all_stores = get_stores()
         if all_stores.empty:
             st.warning("No active stores found.")
             return
@@ -235,11 +354,45 @@ def render_new_shipment() -> None:
         stores = all_stores[all_stores["store_name"].isin(selected_store_names)].copy()
         editor_key = f"new_editor_custom_{'_'.join(sorted(selected_store_names))}"
 
+    # ── Shipment Method (outside form so Courier fields appear immediately) ──
+    method = st.selectbox(
+        "Shipment Method",
+        ["", *METHODS],
+        format_func=lambda x: "— Select method —" if x == "" else x,
+        key="new_shipment_method",
+    )
+
+    # ── Courier package details (only when Courier selected) ─────────────────
+    from starshipit import SERVICE_OPTIONS, DEFAULT_SERVICE_CODE
+    pkg_info: dict = {}
+    if method == "Courier":
+        with st.container(border=True):
+            st.markdown("**Package Details** — applied to each store's consignment")
+            pc1, pc2, pc3, pc4 = st.columns(4)
+            pkg_info["weight"] = pc1.number_input(
+                "Weight / box (kg)", min_value=0.1, max_value=50.0,
+                value=1.0, step=0.1, key="pkg_weight",
+            )
+            pkg_info["length"] = pc2.number_input(
+                "Length (cm)", min_value=1, max_value=300,
+                value=30, step=1, key="pkg_length",
+            )
+            pkg_info["width"] = pc3.number_input(
+                "Width (cm)", min_value=1, max_value=300,
+                value=20, step=1, key="pkg_width",
+            )
+            pkg_info["height"] = pc4.number_input(
+                "Height (cm)", min_value=1, max_value=300,
+                value=15, step=1, key="pkg_height",
+            )
+            svc_label = st.selectbox(
+                "NZ Post Service", list(SERVICE_OPTIONS.keys()), key="pkg_service",
+            )
+            pkg_info["service_code"] = SERVICE_OPTIONS[svc_label]
+
     # ── Shipment form ─────────────────────────────────────────────────────────
     with st.form("new_shipment", clear_on_submit=False):
-        c1, c2 = st.columns([1, 1])
-        shipment_date = c1.date_input("Shipment Date", value=_today_nz())
-        method = c2.selectbox("Shipment Method", ["", *METHODS], format_func=lambda x: "— Select method —" if x == "" else x)
+        shipment_date = st.date_input("Shipment Date", value=_today_nz())
         notes = st.text_area("Notes", placeholder="Optional reference or instructions")
         if stores.empty:
             st.warning("This group has no active stores.")
@@ -261,6 +414,7 @@ def render_new_shipment() -> None:
         submitted = st.form_submit_button(
             "Save Shipment", type="primary", use_container_width=True
         )
+
     if submitted:
         if not method:
             st.error("Please select a Shipment Method before saving.")
@@ -275,15 +429,32 @@ def render_new_shipment() -> None:
             for _, row in editor.iterrows()
         ]
         try:
-            shipment_id, pallet_id = create_shipment(
-                shipment_date, method, notes, details
-            )
-            message = f"Shipment #{shipment_id} saved with {total:,} boxes."
-            if pallet_id:
-                message += f" Pallet ID: {pallet_id}"
-            st.success(message)
+            shipment_id, pallet_id = create_shipment(shipment_date, method, notes, details)
         except Exception as exc:
             st.error(str(exc))
+            return
+
+        if method == "Courier":
+            # Book a Starshipit consignment for every store that has boxes
+            stores_to_book = [d for d in details if d["boxes"] > 0]
+            results = _build_courier_stores(shipment_id, stores_to_book, pkg_info)
+            if results:
+                st.session_state["_courier_results"] = {
+                    "shipment_id": shipment_id,
+                    "results": results,
+                }
+        else:
+            message = f"Shipment #{shipment_id} saved with {total:,} boxes."
+            if pallet_id:
+                message += f"  Pallet ID: {pallet_id}"
+            st.success(message)
+            # Clear any leftover courier result panel from a previous booking
+            st.session_state.pop("_courier_results", None)
+
+    # ── Courier booking results panel ─────────────────────────────────────────
+    if "_courier_results" in st.session_state:
+        state = st.session_state["_courier_results"]
+        _render_courier_results(state["shipment_id"], state["results"])
 
 
 def render_history() -> None:
@@ -406,6 +577,47 @@ def render_history() -> None:
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
+    # ── Courier bookings for this shipment ────────────────────────────────────
+    if header.get("shipment_method") == "Courier":
+        cb = get_courier_bookings(int(selected_id))
+        if not cb.empty:
+            from starshipit import tracking_url
+            st.markdown("**Courier Bookings**")
+            for _, row in cb.iterrows():
+                with st.container(border=True):
+                    col1, col2, col3, col4 = st.columns([3, 3, 2, 2])
+                    status_icon = "✅" if row["booking_status"] == "Booked" else "❌"
+                    col1.markdown(
+                        f"{status_icon} **{row['store_name']}**  \n"
+                        f"{row['boxes']} box{'es' if row['boxes'] != 1 else ''}"
+                    )
+                    if row["booking_status"] == "Booked" and row.get("tracking_number"):
+                        col2.code(str(row["tracking_number"]), language=None)
+                        col3.markdown(
+                            f"{row.get('carrier', '')}  \n`{row.get('service_code', '')}`"
+                        )
+                        lc1, lc2 = col4.columns(2)
+                        if row.get("label_url"):
+                            lc1.link_button("🖨", row["label_url"], use_container_width=True, help="Print label")
+                        lc2.link_button(
+                            "📦", tracking_url(str(row["tracking_number"])),
+                            use_container_width=True, help="Track parcel",
+                        )
+                    else:
+                        col2.caption(str(row.get("api_error") or "No tracking number")[:100])
+                        if col4.button(
+                            "↺ Retry",
+                            key=f"retry_{row['id']}",
+                            type="secondary",
+                        ):
+                            with st.spinner(f"Retrying {row['store_name']}…"):
+                                ok, msg = retry_courier_booking(int(row["id"]))
+                            if ok:
+                                st.success(f"Rebooked {row['store_name']} — tracking: {msg}")
+                                st.rerun()
+                            else:
+                                st.error(f"Retry failed: {msg}")
+
     confirm = st.checkbox("I understand this will delete the whole shipment.")
     if st.button(
         "Delete Shipment",
