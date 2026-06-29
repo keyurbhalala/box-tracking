@@ -207,7 +207,7 @@ def _build_payload(
         "order": {
             "order_number": reference,   # required by Starshipit API
             "reference":    reference,
-            "carrier_name": "NZ Post",
+            "carrier_name": "NZ Post Domestic",
             # service_code intentionally NOT set here — Starshipit concatenates
             # any value stored on the order with carrier_service_code sent to
             # POST /api/orders/shipment, producing "NZREG,NZREG" which is invalid.
@@ -371,7 +371,7 @@ def create_order(
                 label_pdf=label_pdf,
                 label_error=label_error,
                 consignment_id=order_id,
-                carrier=actual_carrier or "NZ Post",
+                carrier=actual_carrier or "NZ Post Domestic",
                 service_code=actual_svc,
                 booking_status="Booked",
                 booked_at=datetime.utcnow().isoformat(timespec="seconds"),
