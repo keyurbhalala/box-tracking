@@ -129,6 +129,7 @@ class BookingResult:
     boxes: int
     tracking_number: str = ""
     label_url: str = ""
+    label_pdf: bytes = b""    # decoded PDF from POST /api/orders/shipment
     consignment_id: str = ""
     carrier: str = ""
     service_code: str = ""
@@ -158,20 +159,18 @@ def _headers() -> dict[str, str]:
         ) from exc
 
 
-def _build_payload(
-    sender: Address,
-    recipient: Address,
-    package: Package,
-    reference: str,
-    service_code: str,
-) -> dict[str, Any]:
-    # Starshipit API expects dimensions in METRES. Users enter cm → divide by 100.
-    def _cm_to_m(val: float) -> float:
-        return round(val / 100, 4)
+def _cm_to_m(val: float) -> float:
+    """Convert centimetres to metres for Starshipit API (which expects metres)."""
+    return round(val / 100, 4)
 
+
+def _build_packages_list(package: Package) -> list[dict[str, Any]]:
+    """
+    Build the packages list used by both POST /api/orders and POST /api/orders/shipment.
+    Each entry: {weight (kg), length/width/height (m), quantity}.
+    """
     if package.per_box_dims:
-        # Each physical box has its own dimensions — send as individual package entries.
-        packages_list = [
+        return [
             {
                 "weight":   float(d.get("weight") or 1.0),
                 "length":   _cm_to_m(float(d.get("length") or 30.0)),
@@ -182,9 +181,8 @@ def _build_payload(
             for d in package.per_box_dims
         ]
     else:
-        # All boxes are the same size — use quantity shorthand.
         total_weight = round(package.weight_per_box * package.boxes, 3)
-        packages_list = [
+        return [
             {
                 "weight":   total_weight,
                 "length":   _cm_to_m(package.length),
@@ -193,10 +191,21 @@ def _build_payload(
                 "quantity": package.boxes,
             }
         ]
-    return {
+
+
+def _build_payload(
+    sender: Address,
+    recipient: Address,
+    package: Package,
+    reference: str,
+    service_code: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return (order_payload, packages_list). packages_list is reused for label submission."""
+    packages_list = _build_packages_list(package)
+    payload = {
         "order": {
             "order_number": reference,   # required by Starshipit API
-            "reference":    reference,   # optional customer reference (same value)
+            "reference":    reference,
             "carrier_name": "NZ Post",
             "service_code": service_code,
             **_BOOKING_DEFAULTS,
@@ -205,6 +214,73 @@ def _build_payload(
             "packages":       packages_list,
         }
     }
+    return payload, packages_list
+
+
+def _submit_for_label(
+    order_id: str,
+    service_code: str,
+    packages_list: list[dict[str, Any]],
+    reprint: bool = False,
+) -> tuple[bytes, str]:
+    """
+    POST /api/orders/shipment — submits the order to NZ Post and returns label PDF bytes.
+
+    On first call (reprint=False): submits to carrier, moves order to "Printed" in NZ Post.
+    On reprint (reprint=True):     fetches previously generated labels.
+
+    The `labels` field in the response is a list of base64-encoded PDF strings,
+    one per physical package/box.  We decode and concatenate them.
+    """
+    import base64
+
+    # Expand quantity>1 into individual package entries — the shipment endpoint
+    # expects one dict per physical box, not quantity shortcuts.
+    expanded: list[dict] = []
+    for pkg in packages_list:
+        qty = int(pkg.get("quantity", 1))
+        base = {k: v for k, v in pkg.items() if k != "quantity"}
+        if qty > 1:
+            # Split total weight equally across boxes
+            per_box_w = round(base.get("weight", 1.0) / qty, 3)
+            for _ in range(qty):
+                expanded.append({**base, "weight": per_box_w})
+        else:
+            expanded.append(base)
+
+    try:
+        resp = requests.post(
+            f"{STARSHIPIT_API_BASE}/orders/shipment",
+            headers=_headers(),
+            json={
+                "order_id":            int(order_id),
+                "carrier":             "NZ Post",
+                "carrier_service_code": service_code,
+                "packages":            expanded,
+                "reprint":             reprint,
+            },
+            timeout=30,
+        )
+        log.debug("Starshipit shipment label [%s]: %.500s", resp.status_code, resp.text)
+        data = resp.json()
+
+        if data.get("success") and data.get("labels"):
+            pdfs = [base64.b64decode(lbl) for lbl in data["labels"]]
+            return b"".join(pdfs), ""
+
+        errors = data.get("errors") or []
+        msg = (
+            "; ".join(e.get("description", str(e)) for e in errors)
+            if errors
+            else data.get("message", f"No labels in response (HTTP {resp.status_code})")
+        )
+        return b"", msg
+
+    except requests.exceptions.Timeout:
+        return b"", "Label request timed out"
+    except Exception as exc:
+        log.exception("Error in _submit_for_label for order %s", order_id)
+        return b"", str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +304,7 @@ def create_order(
     log.info("Starshipit create_order ref=%s store=%s", reference, recipient.name)
     raw = ""
     try:
-        payload = _build_payload(sender, recipient, package, reference, service_code)
+        payload, packages_list = _build_payload(sender, recipient, package, reference, service_code)
         resp = requests.post(
             f"{STARSHIPIT_API_BASE}/orders",
             headers=_headers(),
@@ -240,16 +316,30 @@ def create_order(
         data = resp.json()
 
         if resp.ok and data.get("success"):
-            order    = data.get("order", {})
-            packages = order.get("packages", [])
-            tracking = packages[0].get("tracking_number", "") if packages else ""
+            order      = data.get("order", {})
+            pkgs       = order.get("packages", [])
+            tracking   = pkgs[0].get("tracking_number", "") if pkgs else ""
+            order_id   = str(order.get("order_id", ""))
+
+            # ── Step 2: submit to NZ Post and generate label ──────────────
+            # POST /api/orders only creates a draft; /api/orders/shipment
+            # actually submits to the carrier and returns base64 label PDFs.
+            label_pdf = b""
+            if order_id:
+                label_pdf, lbl_err = _submit_for_label(
+                    order_id, service_code, packages_list, reprint=False
+                )
+                if lbl_err:
+                    log.warning("Label generation failed for %s: %s", reference, lbl_err)
+
             return BookingResult(
                 success=True,
                 store_name=recipient.name,
                 boxes=package.boxes,
                 tracking_number=tracking,
                 label_url=order.get("label_url", ""),
-                consignment_id=str(order.get("order_id", "")),
+                label_pdf=label_pdf,
+                consignment_id=order_id,
                 carrier=order.get("carrier_name", "NZ Post"),
                 service_code=order.get("service_code", service_code),
                 booking_status="Booked",
@@ -308,60 +398,13 @@ def tracking_url(tracking_number: str) -> str:
 
 def generate_labels(order_id: str) -> tuple[bytes, str]:
     """
-    Fetch printable label PDF(s) for an already-created Starshipit order.
+    Reprint labels for an already-submitted Starshipit order.
 
-    Endpoint: POST /api/orders/shipment
-    Docs: https://api.starshipit.com/api/orders/shipment
-      - Send order_id + reprint=True to retrieve labels for an existing order.
-      - Response: {"success": true, "labels": ["<base64>", ...], "tracking_numbers": [...]}
-      - Each element of `labels` is a base64-encoded PDF string.
-
-    Returns:
-        (pdf_bytes, "")    — decoded PDF ready for st.download_button
-        (b"",  error_msg) — failure
+    Uses POST /api/orders/shipment with reprint=True — for orders that were
+    already submitted (e.g. from shipment history / retry flow).
+    Returns (pdf_bytes, error_message).
     """
-    import base64
-
     if not order_id:
         return b"", "No order ID provided"
-
-    log.info("Starshipit generate_labels for order_id=%s", order_id)
-    try:
-        resp = requests.post(
-            f"{STARSHIPIT_API_BASE}/orders/shipment",
-            headers=_headers(),
-            json={
-                "order_id": int(order_id),
-                "reprint":  True,
-            },
-            timeout=30,
-        )
-        raw = resp.text
-        log.debug("Starshipit shipment label [%s]: %.500s", resp.status_code, raw)
-        data = resp.json()
-
-        if data.get("success") and data.get("labels"):
-            # labels is a list of base64-encoded PDF strings (one per package/box).
-            # Concatenating the decoded bytes works when each element is a
-            # single-page PDF — the browser/printer sees each page in sequence.
-            pdfs = [base64.b64decode(lbl) for lbl in data["labels"]]
-            combined = b"".join(pdfs)
-            return combined, ""
-
-        errors = data.get("errors") or []
-        msg = (
-            "; ".join(e.get("description", str(e)) for e in errors)
-            if errors
-            else data.get("message", f"No labels in response (HTTP {resp.status_code})")
-        )
-        return b"", msg
-
-    except requests.exceptions.Timeout:
-        return b"", "Label request timed out (30 s)"
-    except requests.exceptions.ConnectionError as exc:
-        return b"", f"Connection error: {exc}"
-    except RuntimeError as exc:
-        return b"", str(exc)
-    except Exception as exc:
-        log.exception("Unexpected error fetching labels for order %s", order_id)
-        return b"", str(exc)
+    log.info("Starshipit reprint labels for order_id=%s", order_id)
+    return _submit_for_label(order_id, "", [], reprint=True)

@@ -312,22 +312,11 @@ def _build_courier_stores(
 
     progress.empty()
 
-    # ── Fetch printable labels for each successfully booked store ────────────
-    # Labels come from POST /api/orders/shipment with reprint=True.
-    # The response contains base64-encoded PDFs (one per box/package).
-    booked_results = [r for r in results if r.success and r.consignment_id]
-    st.session_state["_store_labels"] = {}   # {consignment_id: pdf_bytes}
-    if booked_results:
-        from starshipit import generate_labels
-        lbl_progress = st.progress(0, text="Fetching labels…")
-        for i, r in enumerate(booked_results):
-            pdf_bytes, lbl_err = generate_labels(r.consignment_id)
-            if pdf_bytes:
-                st.session_state["_store_labels"][r.consignment_id] = pdf_bytes
-            else:
-                log.warning("Label fetch failed for %s: %s", r.store_name, lbl_err)
-            lbl_progress.progress((i + 1) / len(booked_results), text=f"Label for {r.store_name}…")
-        lbl_progress.empty()
+    # ── Store label PDFs from create_order (already fetched via /api/orders/shipment) ──
+    st.session_state["_store_labels"] = {}
+    for r in results:
+        if r.success and r.label_pdf:
+            st.session_state["_store_labels"][r.consignment_id] = r.label_pdf
 
     return results
 
