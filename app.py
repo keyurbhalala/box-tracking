@@ -322,6 +322,38 @@ def _build_courier_stores(
     return results
 
 
+def _print_label_button(pdf_bytes: bytes, key: str) -> None:
+    """
+    Renders a 'Print Label' button that opens the browser's print dialog.
+    Works on Streamlit Cloud — uses JS to embed the PDF and call window.print().
+    The user can then select any printer installed on their computer.
+    """
+    import base64, hashlib
+    b64 = base64.b64encode(pdf_bytes).decode()
+    # Use a short hash as the iframe/button id so multiple buttons on screen don't clash
+    uid = hashlib.md5(key.encode()).hexdigest()[:8]
+    html = f"""
+    <style>
+      #btn_{uid} {{
+        background:#1a7f5a; color:#fff; border:none; border-radius:6px;
+        padding:6px 14px; font-size:14px; cursor:pointer; width:100%;
+        font-family:sans-serif; font-weight:500;
+      }}
+      #btn_{uid}:hover {{ background:#145f44; }}
+    </style>
+    <button id="btn_{uid}" onclick="
+      var frame = document.getElementById('pdf_{uid}');
+      frame.src = 'data:application/pdf;base64,{b64}';
+      frame.onload = function() {{
+        frame.contentWindow.focus();
+        frame.contentWindow.print();
+      }};
+    ">🖨 Print Label</button>
+    <iframe id="pdf_{uid}" style="display:none" width="0" height="0"></iframe>
+    """
+    st.components.v1.html(html, height=40)
+
+
 def _render_courier_results(shipment_id: int, results: list) -> None:
     """Display the per-store courier booking results table."""
     from starshipit import tracking_url, SERVICE_OPTIONS
@@ -355,15 +387,8 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                 # Prefer freshly-fetched PDF bytes; fall back to label_url from order creation
                 pdf_bytes = store_labels.get(r.consignment_id)
                 if pdf_bytes:
-                    safe_name = r.store_name.replace(" ", "_").lower()
-                    link_col1.download_button(
-                        "🖨 Label",
-                        data=pdf_bytes,
-                        file_name=f"label_{safe_name}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key=f"lbl_{r.consignment_id}",
-                    )
+                    with link_col1:
+                        _print_label_button(pdf_bytes, key=f"lbl_{r.consignment_id}")
                 elif r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
                 elif r.label_error:
