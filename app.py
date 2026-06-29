@@ -131,24 +131,14 @@ def downloads(df: pd.DataFrame, stem: str, summary: dict | None = None) -> None:
 def shipment_editor_rows(
     stores: pd.DataFrame,
     existing: pd.DataFrame | None = None,
-    default_dims: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Build the data editor DataFrame.
-    When default_dims is supplied (Courier mode), four editable dimension columns
-    are added, pre-filled with the defaults.  Users can override per-store.
-    """
+    """Build the data editor DataFrame (Store ID hidden, Store, Group, Boxes)."""
     rows = stores[["id", "store_name", "group_name"]].copy()
     rows.columns = ["Store ID", "Store", "Group"]
     rows["Boxes"] = 0
     if existing is not None and not existing.empty:
         box_map = existing.set_index("store_id")["boxes"].to_dict()
         rows["Boxes"] = rows["Store ID"].map(box_map).fillna(0).astype(int)
-    if default_dims:
-        rows["Wt/box (kg)"] = float(default_dims.get("weight", 1.0))
-        rows["L (cm)"]       = int(default_dims.get("length", 30))
-        rows["W (cm)"]       = int(default_dims.get("width", 20))
-        rows["H (cm)"]       = int(default_dims.get("height", 15))
     return rows
 
 
@@ -255,13 +245,17 @@ def _build_courier_stores(
     progress = st.progress(0, text="Booking couriers with Starshipit…")
 
     for i, d in enumerate(details):
-        # Per-store package dimensions (set by user in the editor)
+        # Uniform fallback dims (used when per_box_dims is absent, and for DB summary)
         w  = float(d.get("weight", 1.0) or 1.0)
         ln = float(d.get("length", 30.0) or 30.0)
         wd = float(d.get("width",  20.0) or 20.0)
         ht = float(d.get("height", 15.0) or 15.0)
 
         store = get_store_with_address(d["store_id"])
+
+        # Per-box dimensions: supplied as a list of dicts by the new UI.
+        # Falls back to the legacy uniform-size fields if not present.
+        per_box = d.get("box_dims")          # list[dict] | None
 
         if not store or not store.get("street"):
             r = BookingResult(
@@ -286,9 +280,24 @@ def _build_courier_stores(
                 email=store.get("email") or "",
                 building=store.get("building") or "",
             )
-            pkg = Package(boxes=d["boxes"], weight_per_box=w, length=ln, width=wd, height=ht)
+            pkg = Package(
+                boxes=d["boxes"],
+                weight_per_box=w,
+                length=ln,
+                width=wd,
+                height=ht,
+                per_box_dims=per_box,
+            )
             ref = f"SHP-{shipment_id}-{d['store_id']}"
             r   = create_order(sender, recipient, pkg, ref, service_code)
+
+        # For the DB summary, use first-box dims (or the uniform dims).
+        if per_box:
+            first = per_box[0]
+            w  = float(first.get("weight") or w)
+            ln = float(first.get("length") or ln)
+            wd = float(first.get("width")  or wd)
+            ht = float(first.get("height") or ht)
 
         save_courier_booking(
             shipment_id, d["store_id"], d["store_name"], d["boxes"],
@@ -389,136 +398,211 @@ def render_new_shipment() -> None:
         key="new_shipment_method",
     )
 
-    # ── Courier defaults + service (outside form, Courier only) ──────────────
     from starshipit import SERVICE_OPTIONS, DEFAULT_SERVICE_CODE
-    pkg_defaults: dict = {}
-    service_code = DEFAULT_SERVICE_CODE
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # COURIER — fully reactive flow (no form so box count changes immediately
+    # show/hide per-box dimension tables without a form submit).
+    # ══════════════════════════════════════════════════════════════════════════
     if method == "Courier":
         with st.container(border=True):
-            st.markdown(
-                "**Default package size** — pre-fills every row below.  "
-                "Override individual rows in the table for stores with different boxes."
-            )
-            pc1, pc2, pc3, pc4 = st.columns(4)
-            pkg_defaults["weight"] = pc1.number_input(
-                "Weight / box (kg)", min_value=0.1, max_value=50.0,
-                value=1.0, step=0.1, key="pkg_weight",
-            )
-            pkg_defaults["length"] = pc2.number_input(
-                "Length (cm)", min_value=1, max_value=300,
-                value=30, step=1, key="pkg_length",
-            )
-            pkg_defaults["width"] = pc3.number_input(
-                "Width (cm)", min_value=1, max_value=300,
-                value=20, step=1, key="pkg_width",
-            )
-            pkg_defaults["height"] = pc4.number_input(
-                "Height (cm)", min_value=1, max_value=300,
-                value=15, step=1, key="pkg_height",
-            )
             svc_label = st.selectbox(
                 "NZ Post Service", list(SERVICE_OPTIONS.keys()), key="pkg_service",
             )
             service_code = SERVICE_OPTIONS[svc_label]
-            st.caption(
-                "💡 To apply different box sizes per store, edit the "
-                "Wt/box, L, W, H columns directly in the table below."
-            )
 
-    # ── Editor key changes when method changes → forces fresh pre-fill ────────
-    editor_key = f"{_base_key}_{method}"
+        courier_date = st.date_input("Shipment Date", value=_today_nz(), key="courier_date")
+        courier_notes = st.text_area(
+            "Notes", placeholder="Optional reference or instructions", key="courier_notes"
+        )
 
-    # ── Shipment form ─────────────────────────────────────────────────────────
-    # Dimension columns (Wt/box, L, W, H) appear only in Courier mode.
-    dim_col_config: dict = {}
-    if method == "Courier":
-        dim_col_config = {
-            "Wt/box (kg)": st.column_config.NumberColumn(
-                "Wt/box (kg)", min_value=0.1, max_value=50.0, step=0.1, format="%.1f",
-            ),
-            "L (cm)": st.column_config.NumberColumn(
-                "L (cm)", min_value=1, max_value=300, step=1, format="%d",
-            ),
-            "W (cm)": st.column_config.NumberColumn(
-                "W (cm)", min_value=1, max_value=300, step=1, format="%d",
-            ),
-            "H (cm)": st.column_config.NumberColumn(
-                "H (cm)", min_value=1, max_value=300, step=1, format="%d",
-            ),
-        }
-
-    with st.form("new_shipment", clear_on_submit=False):
-        shipment_date = st.date_input("Shipment Date", value=_today_nz())
-        notes = st.text_area("Notes", placeholder="Optional reference or instructions")
-        if stores.empty:
-            st.warning("This group has no active stores.")
-        editor = st.data_editor(
-            shipment_editor_rows(
-                stores,
-                default_dims=pkg_defaults if method == "Courier" else None,
-            ),
+        # ── Box count editor ──────────────────────────────────────────────────
+        bc_key = f"{_base_key}_courier_boxes"
+        box_editor = st.data_editor(
+            shipment_editor_rows(stores),
             hide_index=True,
             use_container_width=True,
-            disabled=["Store ID", "Store", "Group"],
+            disabled=["Store", "Group"],
             column_config={
                 "Store ID": None,
                 "Boxes": st.column_config.NumberColumn(
                     "Boxes", min_value=0, step=1, format="%d"
                 ),
-                **dim_col_config,
             },
-            key=editor_key,
+            key=bc_key,
         )
-        total = int(pd.to_numeric(editor["Boxes"], errors="coerce").fillna(0).sum())
-        st.caption(f"Shipment total: **{total:,} boxes**")
-        submitted = st.form_submit_button(
-            "Save Shipment", type="primary", use_container_width=True
+        courier_total = int(
+            pd.to_numeric(box_editor["Boxes"], errors="coerce").fillna(0).sum()
         )
+        st.caption(f"Shipment total: **{courier_total:,} boxes**")
 
-    if submitted:
-        if not method:
-            st.error("Please select a Shipment Method before saving.")
-            return
-
-        # Build per-store details — include per-row dimensions when Courier
-        is_courier = (method == "Courier")
-        details = [
-            {
-                "store_id":   int(row["Store ID"]),
-                "store_name": row["Store"],
-                "group_name": row["Group"],
-                "boxes":      int(row["Boxes"] or 0),
-                **(
-                    {
-                        "weight": float(row.get("Wt/box (kg)") or 1.0),
-                        "length": float(row.get("L (cm)") or 30),
-                        "width":  float(row.get("W (cm)") or 20),
-                        "height": float(row.get("H (cm)") or 15),
-                    }
-                    if is_courier else {}
-                ),
-            }
-            for _, row in editor.iterrows()
+        # ── Per-store per-box dimension tables ────────────────────────────────
+        # Appear automatically as box counts are entered.  Each physical box gets
+        # its own row so different sizes can be declared within one store.
+        stores_with_boxes = [
+            (int(row["Store ID"]), row["Store"], row["Group"], int(row.get("Boxes") or 0))
+            for _, row in box_editor.iterrows()
+            if int(row.get("Boxes") or 0) > 0
         ]
 
-        try:
-            shipment_id, pallet_id = create_shipment(shipment_date, method, notes, details)
-        except Exception as exc:
-            st.error(str(exc))
-            return
+        dim_editors: dict[int, pd.DataFrame] = {}
+        if stores_with_boxes:
+            st.markdown("---")
+            st.markdown("#### 📦 Box Dimensions")
+            st.caption(
+                "One row per physical box. Edit weight and dimensions for each box individually. "
+                "All boxes for one store go in a single consignment."
+            )
+            for store_id, store_name, _grp, n_boxes in stores_with_boxes:
+                with st.expander(
+                    f"📦 {store_name} — {n_boxes} box{'es' if n_boxes > 1 else ''}",
+                    expanded=True,
+                ):
+                    # Key includes store_id + n_boxes so it resets if box count changes.
+                    # Session state preserves edits across other reruns.
+                    dim_key = f"dims_{bc_key}_{store_id}_{n_boxes}"
+                    default_df = pd.DataFrame([
+                        {
+                            "Box":    f"Box {i + 1}",
+                            "Wt (kg)": 1.0,
+                            "L (cm)":  30,
+                            "W (cm)":  20,
+                            "H (cm)":  15,
+                        }
+                        for i in range(n_boxes)
+                    ])
+                    dim_editors[store_id] = st.data_editor(
+                        default_df,
+                        column_config={
+                            "Box": st.column_config.TextColumn("Box", disabled=True),
+                            "Wt (kg)": st.column_config.NumberColumn(
+                                "Wt (kg)", min_value=0.1, max_value=50.0,
+                                step=0.1, format="%.1f",
+                            ),
+                            "L (cm)": st.column_config.NumberColumn(
+                                "L (cm)", min_value=1, max_value=300, step=1, format="%d",
+                            ),
+                            "W (cm)": st.column_config.NumberColumn(
+                                "W (cm)", min_value=1, max_value=300, step=1, format="%d",
+                            ),
+                            "H (cm)": st.column_config.NumberColumn(
+                                "H (cm)", min_value=1, max_value=300, step=1, format="%d",
+                            ),
+                        },
+                        key=dim_key,
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
-        if is_courier:
+        st.markdown("---")
+        courier_save = st.button(
+            "Save Shipment & Book Courier",
+            type="primary",
+            use_container_width=True,
+            key="save_courier_btn",
+            disabled=(courier_total == 0),
+        )
+
+        if courier_save:
+            details: list[dict] = []
+            for _, row in box_editor.iterrows():
+                n   = int(row.get("Boxes") or 0)
+                sid = int(row["Store ID"])
+                d: dict = {
+                    "store_id":   sid,
+                    "store_name": row["Store"],
+                    "group_name": row["Group"],
+                    "boxes":      n,
+                }
+                if n > 0:
+                    if sid in dim_editors:
+                        d["box_dims"] = [
+                            {
+                                "weight": float(r.get("Wt (kg)") or 1.0),
+                                "length": float(r.get("L (cm)") or 30),
+                                "width":  float(r.get("W (cm)") or 20),
+                                "height": float(r.get("H (cm)") or 15),
+                            }
+                            for _, r in dim_editors[sid].iterrows()
+                        ]
+                    else:
+                        # Fallback if dim editor wasn't rendered (shouldn't happen)
+                        d["box_dims"] = [
+                            {"weight": 1.0, "length": 30, "width": 20, "height": 15}
+                        ] * n
+                details.append(d)
+
+            try:
+                shipment_id, _ = create_shipment(
+                    courier_date, method, courier_notes, details
+                )
+            except Exception as exc:
+                st.error(str(exc))
+                return
+
             stores_to_book = [d for d in details if d["boxes"] > 0]
-            results = _build_courier_stores(shipment_id, stores_to_book, service_code)
+            results = _build_courier_stores(
+                shipment_id, stores_to_book, service_code
+            )
             if results:
                 st.session_state["_courier_results"] = {
                     "shipment_id": shipment_id,
                     "results": results,
                 }
-        else:
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PALLET / DELIVERY — standard form (no per-box dims needed)
+    # ══════════════════════════════════════════════════════════════════════════
+    elif method in ("Pallet", "Delivery"):
+        editor_key = f"{_base_key}_{method}"
+        with st.form("new_shipment", clear_on_submit=False):
+            shipment_date = st.date_input("Shipment Date", value=_today_nz())
+            notes = st.text_area(
+                "Notes", placeholder="Optional reference or instructions"
+            )
+            if stores.empty:
+                st.warning("This group has no active stores.")
+            editor = st.data_editor(
+                shipment_editor_rows(stores),
+                hide_index=True,
+                use_container_width=True,
+                disabled=["Store", "Group"],
+                column_config={
+                    "Store ID": None,
+                    "Boxes": st.column_config.NumberColumn(
+                        "Boxes", min_value=0, step=1, format="%d"
+                    ),
+                },
+                key=editor_key,
+            )
+            total = int(
+                pd.to_numeric(editor["Boxes"], errors="coerce").fillna(0).sum()
+            )
+            st.caption(f"Shipment total: **{total:,} boxes**")
+            submitted = st.form_submit_button(
+                "Save Shipment", type="primary", use_container_width=True
+            )
+
+        if submitted:
+            details = [
+                {
+                    "store_id":   int(row["Store ID"]),
+                    "store_name": row["Store"],
+                    "group_name": row["Group"],
+                    "boxes":      int(row["Boxes"] or 0),
+                }
+                for _, row in editor.iterrows()
+            ]
+            try:
+                shipment_id, pallet_id = create_shipment(
+                    shipment_date, method, notes, details
+                )
+            except Exception as exc:
+                st.error(str(exc))
+                return
             message = f"Shipment #{shipment_id} saved with {total:,} boxes."
             if pallet_id:
-                message += f"  Pallet ID: {pallet_id}"
+                message += f"  Pallet ID: **{pallet_id}**"
             st.success(message)
             st.session_state.pop("_courier_results", None)
 

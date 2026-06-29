@@ -101,10 +101,14 @@ class Address:
 @dataclass
 class Package:
     boxes: int
-    weight_per_box: float   # kg
+    weight_per_box: float   # kg  (used when all boxes share the same size)
     length: float           # cm
     width: float            # cm
     height: float           # cm
+    # Optional per-box override: list of {weight, length, width, height} dicts,
+    # one entry per physical box.  When set, each box is sent as a separate
+    # package line in the Starshipit payload so dimensions differ per box.
+    per_box_dims: "list[dict] | None" = None
 
 
 @dataclass
@@ -151,7 +155,30 @@ def _build_payload(
     reference: str,
     service_code: str,
 ) -> dict[str, Any]:
-    total_weight = round(package.weight_per_box * package.boxes, 3)
+    if package.per_box_dims:
+        # Each physical box has its own dimensions — send as individual package entries.
+        packages_list = [
+            {
+                "weight":   float(d.get("weight") or 1.0),
+                "length":   float(d.get("length") or 30.0),
+                "width":    float(d.get("width")  or 20.0),
+                "height":   float(d.get("height") or 15.0),
+                "quantity": 1,
+            }
+            for d in package.per_box_dims
+        ]
+    else:
+        # All boxes are the same size — use quantity shorthand.
+        total_weight = round(package.weight_per_box * package.boxes, 3)
+        packages_list = [
+            {
+                "weight":   total_weight,
+                "length":   package.length,
+                "width":    package.width,
+                "height":   package.height,
+                "quantity": package.boxes,
+            }
+        ]
     return {
         "order": {
             "reference":    reference,
@@ -160,15 +187,7 @@ def _build_payload(
             **_BOOKING_DEFAULTS,
             "sender_details": sender.as_api_dict(),
             "destination":    recipient.as_api_dict(),
-            "packages": [
-                {
-                    "weight":   total_weight,
-                    "length":   package.length,
-                    "width":    package.width,
-                    "height":   package.height,
-                    "quantity": package.boxes,
-                }
-            ],
+            "packages":       packages_list,
         }
     }
 
