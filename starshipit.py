@@ -427,42 +427,23 @@ def tracking_url(tracking_number: str) -> str:
     return NZ_POST_TRACKING_URL.format(tracking_number)
 
 
-def get_available_services(
-    from_postcode: str = "1061",
-    to_postcode: str = "0110",
-    weight: float = 5.0,
-) -> list[dict]:
+def get_order_details(order_id: str) -> dict:
     """
-    Call GET /api/rates to discover valid carrier_service_code values for NZ Post.
-    Use this in Admin to find the correct code for POST /api/orders/shipment.
-    Returns list of {carrier, service_code, service_name, price} dicts.
+    GET /api/orders/{order_id} — fetch a Starshipit order and return its full dict.
+    Use this to inspect what service_code / carrier Starshipit stored on the order.
     """
     try:
         resp = requests.get(
-            f"{STARSHIPIT_API_BASE}/rates",
+            f"{STARSHIPIT_API_BASE}/orders/{order_id}",
             headers=_headers(),
-            params={
-                "from_postcode": from_postcode,
-                "to_postcode":   to_postcode,
-                "weight":        weight,
-            },
             timeout=30,
         )
-        log.info("Starshipit rates [%s]: %.2000s", resp.status_code, resp.text)
+        log.info("Starshipit GET order [%s]: %.2000s", resp.status_code, resp.text)
         data = resp.json()
-        rates = data.get("rates") or data.get("results") or []
-        return [
-            {
-                "carrier":      r.get("carrier_name") or r.get("carrier", ""),
-                "service_code": r.get("service_code") or r.get("carrier_service_code", ""),
-                "service_name": r.get("service_name") or r.get("name", ""),
-                "price":        r.get("price") or r.get("total_price", ""),
-            }
-            for r in rates
-        ]
+        return data.get("order") or data
     except Exception as exc:
-        log.exception("Error fetching rates")
-        return [{"error": str(exc)}]
+        log.exception("Error fetching order %s", order_id)
+        return {"error": str(exc)}
 
 
 def generate_labels(order_id: str) -> tuple[bytes, str]:
