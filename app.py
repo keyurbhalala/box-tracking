@@ -322,7 +322,7 @@ def _build_courier_stores(
     return results
 
 
-PRINT_SERVER_URL = "http://localhost:8765"
+PRINT_SERVER_URL = "https://localhost:8765"
 
 
 def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC42d (203 dpi)") -> None:
