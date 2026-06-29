@@ -322,40 +322,19 @@ def _build_courier_stores(
     return results
 
 
-def _print_label_button(pdf_bytes: bytes, key: str) -> None:
+def _show_label_inline(pdf_bytes: bytes, key: str) -> None:
     """
-    Opens the label PDF in a new browser tab.
-    The browser's built-in PDF viewer has a print button — user selects printer there.
-    Uses a programmatic link click (not window.open) so it's never popup-blocked.
+    Embeds the label PDF directly in the page using the browser's native PDF viewer.
+    The viewer toolbar has a Print button — user clicks it to pick their printer.
+    No JS tricks needed; works reliably on Streamlit Cloud.
     """
-    import base64, hashlib
+    import base64
     b64 = base64.b64encode(pdf_bytes).decode()
-    uid = hashlib.md5(key.encode()).hexdigest()[:8]
-    html = f"""
-    <style>
-      #btn_{uid} {{
-        background:#1a7f5a; color:#fff; border:none; border-radius:6px;
-        padding:6px 14px; font-size:14px; cursor:pointer; width:100%;
-        font-family:sans-serif; font-weight:500;
-      }}
-      #btn_{uid}:hover {{ background:#145f44; }}
-    </style>
-    <button id="btn_{uid}" onclick="(function(){{
-      var b64='{b64}';
-      var raw=atob(b64);
-      var arr=new Uint8Array(raw.length);
-      for(var i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
-      var blob=new Blob([arr],{{type:'application/pdf'}});
-      var url=URL.createObjectURL(blob);
-      var a=document.createElement('a');
-      a.href=url; a.target='_blank'; a.rel='noopener';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(function(){{URL.revokeObjectURL(url);}},10000);
-    }})()">🖨 Print Label</button>
-    """
-    st.components.v1.html(html, height=42)
+    st.components.v1.html(
+        f'<embed src="data:application/pdf;base64,{b64}" '
+        f'type="application/pdf" width="100%" height="480px" />',
+        height=490,
+    )
 
 
 def _render_courier_results(shipment_id: int, results: list) -> None:
@@ -391,12 +370,18 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                 # Prefer freshly-fetched PDF bytes; fall back to label_url from order creation
                 pdf_bytes = store_labels.get(r.consignment_id)
                 if pdf_bytes:
-                    with link_col1:
-                        _print_label_button(pdf_bytes, key=f"lbl_{r.consignment_id}")
+                    safe_name = r.store_name.replace(" ", "_").lower()
+                    link_col1.download_button(
+                        "🖨 Print Label",
+                        data=pdf_bytes,
+                        file_name=f"label_{safe_name}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key=f"lbl_{r.consignment_id}",
+                    )
                 elif r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
                 elif r.label_error:
-                    # Show the label error inline so it's visible (not just in logs)
                     c4.warning(f"Label failed: {r.label_error[:120]}")
 
                 if r.tracking_number:
