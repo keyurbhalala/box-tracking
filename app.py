@@ -1622,98 +1622,171 @@ def _get_pins() -> tuple[str, str]:
 
 def _render_pin_screen() -> None:
     """
-    Touch-friendly 4-digit PIN pad built with native Streamlit buttons.
-    Sets st.session_state['pin_role'] to 'admin' or 'general' on success.
+    Touch-friendly 4-digit PIN pad rendered as a full-page HTML component.
+    Works correctly on mobile — CSS grid is not subject to Streamlit's
+    responsive column collapsing.
+    Communicates the result back to Python via a hidden text_input bridge.
     """
     admin_pin, general_pin = _get_pins()
 
-    # Init digit buffer
-    if "_pin_digits" not in st.session_state:
-        st.session_state["_pin_digits"] = []
-    if "_pin_error" not in st.session_state:
-        st.session_state["_pin_error"] = ""
-
-    # ── CSS ──────────────────────────────────────────────────────────────────
+    # ── Hide Streamlit chrome ─────────────────────────────────────────────────
     st.markdown("""
     <style>
-      [data-testid="stSidebar"], header { display: none !important; }
-      /* Make all buttons on this page look like PIN keys */
-      div[data-testid="stVerticalBlock"] button {
-        height: 72px !important;
-        font-size: 26px !important;
-        font-weight: 600 !important;
-        border-radius: 14px !important;
-        border: 1.5px solid #2e4057 !important;
-        background: #1e2d3d !important;
-        color: #e8e8e8 !important;
-        width: 100% !important;
-      }
-      div[data-testid="stVerticalBlock"] button:active {
-        background: #1a7f5a !important;
+      [data-testid="stSidebar"], header, footer { display: none !important; }
+      .stApp > div { padding-top: 0 !important; }
+      /* Push bridge input off-screen */
+      div[data-testid="stTextInput"] {
+        position: fixed; top: -200px; opacity: 0; pointer-events: none;
       }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Centre the pad ────────────────────────────────────────────────────────
-    _, mid, _ = st.columns([1, 1.2, 1])
-    with mid:
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown("### 📦 Shipment Tracker")
-        st.caption("Enter your PIN to continue")
-        st.markdown("<br>", unsafe_allow_html=True)
+    # ── Bridge input — rendered BEFORE the component so it's in the DOM ───────
+    bridge = st.text_input("_bridge", key="_pin_bridge", label_visibility="collapsed")
+    if bridge in ("admin", "general"):
+        st.session_state["pin_role"] = bridge
+        # Clear bridge so it doesn't persist on next rerun
+        st.session_state["_pin_bridge"] = ""
+        st.rerun()
 
-        # Dot display
-        digits = st.session_state["_pin_digits"]
-        dots = "  ".join("🟢" if i < len(digits) else "⚫" for i in range(4))
-        st.markdown(f"<h2 style='text-align:center;letter-spacing:8px'>{dots}</h2>",
-                    unsafe_allow_html=True)
+    # ── Full HTML PIN pad ─────────────────────────────────────────────────────
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+  background: transparent;
+  display: flex; flex-direction: column; align-items: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  padding: 24px 16px;
+  min-height: 100vh;
+}}
+.logo {{ font-size: 42px; margin-bottom: 6px; margin-top: 16px; }}
+.title {{ font-size: 22px; font-weight: 700; color: #e8e8e8; margin-bottom: 4px; }}
+.sub   {{ font-size: 14px; color: #999; margin-bottom: 32px; }}
+.dots  {{ display: flex; gap: 20px; margin-bottom: 36px; }}
+.dot   {{
+  width: 22px; height: 22px; border-radius: 50%;
+  background: #2a2a2a; border: 2px solid #555;
+  transition: background .15s, border-color .15s;
+}}
+.dot.on {{ background: #1a7f5a; border-color: #1a7f5a; }}
+.dot.err {{ background: #c0392b; border-color: #c0392b; }}
+.grid {{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  width: 100%;
+  max-width: 280px;
+}}
+.key {{
+  height: 72px; border-radius: 16px;
+  border: 1.5px solid #2e4057;
+  background: #1e2d3d;
+  color: #e8e8e8; font-size: 28px; font-weight: 600;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  transition: background .1s, transform .08s;
+  touch-action: manipulation;
+}}
+.key:active {{ background: #1a7f5a; transform: scale(.91); }}
+.key.del {{ background: #2c1a1a; border-color: #4a2020; font-size: 24px; }}
+.key.del:active {{ background: #7f1a1a; }}
+.key.blank {{ background: transparent; border-color: transparent; pointer-events: none; }}
+.err-msg {{
+  margin-top: 20px; font-size: 14px; color: #f55;
+  min-height: 20px; text-align: center;
+}}
+</style>
+</head>
+<body>
+<div class="logo">📦</div>
+<div class="title">Shipment Tracker</div>
+<div class="sub">Enter your PIN to continue</div>
+<div class="dots">
+  <div class="dot" id="d0"></div>
+  <div class="dot" id="d1"></div>
+  <div class="dot" id="d2"></div>
+  <div class="dot" id="d3"></div>
+</div>
+<div class="grid">
+  <div class="key" onclick="pk('1')">1</div>
+  <div class="key" onclick="pk('2')">2</div>
+  <div class="key" onclick="pk('3')">3</div>
+  <div class="key" onclick="pk('4')">4</div>
+  <div class="key" onclick="pk('5')">5</div>
+  <div class="key" onclick="pk('6')">6</div>
+  <div class="key" onclick="pk('7')">7</div>
+  <div class="key" onclick="pk('8')">8</div>
+  <div class="key" onclick="pk('9')">9</div>
+  <div class="key blank"></div>
+  <div class="key" onclick="pk('0')">0</div>
+  <div class="key del" onclick="pdel()">⌫</div>
+</div>
+<div class="err-msg" id="errmsg"></div>
 
-        if st.session_state["_pin_error"]:
-            st.error(st.session_state["_pin_error"])
-        else:
-            st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
+<script>
+var pin = '';
+var ADMIN   = '{admin_pin}';
+var GENERAL = '{general_pin}';
 
-        st.markdown("<br>", unsafe_allow_html=True)
+function pk(d) {{
+  if (pin.length >= 4) return;
+  pin += d;
+  updateDots();
+  if (pin.length === 4) setTimeout(check, 60);
+}}
+function pdel() {{
+  pin = pin.slice(0, -1);
+  updateDots();
+  document.getElementById('errmsg').textContent = '';
+  for (var i = 0; i < 4; i++) {{
+    document.getElementById('d' + i).className = 'dot' + (i < pin.length ? ' on' : '');
+  }}
+}}
+function updateDots() {{
+  for (var i = 0; i < 4; i++) {{
+    document.getElementById('d' + i).className = 'dot' + (i < pin.length ? ' on' : '');
+  }}
+}}
+function check() {{
+  var role = '';
+  if (pin === ADMIN)   role = 'admin';
+  if (pin === GENERAL) role = 'general';
 
-        # ── Digit grid (3 columns) ────────────────────────────────────────────
-        def _press(d: str) -> None:
-            if len(st.session_state["_pin_digits"]) < 4:
-                st.session_state["_pin_digits"].append(d)
-                st.session_state["_pin_error"] = ""
+  if (role) {{
+    // Write result into Streamlit's bridge text_input in the parent frame
+    try {{
+      var inputs = window.parent.document.querySelectorAll('input[type="text"]');
+      if (inputs.length > 0) {{
+        var inp = inputs[0];
+        var setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value').set;
+        setter.call(inp, role);
+        inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+      }}
+    }} catch(e) {{ console.warn('bridge error', e); }}
+  }} else {{
+    // Wrong PIN — flash dots red then clear
+    for (var i = 0; i < 4; i++) {{
+      document.getElementById('d' + i).className = 'dot err';
+    }}
+    document.getElementById('errmsg').textContent = '✗ Incorrect PIN — try again';
+    setTimeout(function() {{
+      pin = '';
+      updateDots();
+    }}, 600);
+  }}
+}}
+</script>
+</body>
+</html>"""
 
-        for row in [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"]]:
-            c1, c2, c3 = st.columns(3)
-            for col, digit in zip([c1, c2, c3], row):
-                if col.button(digit, key=f"pk_{digit}", use_container_width=True):
-                    _press(digit)
-
-        # Bottom row: blank | 0 | ⌫
-        b1, b2, b3 = st.columns(3)
-        b1.markdown("")           # empty slot
-        if b2.button("0", key="pk_0", use_container_width=True):
-            _press("0")
-        if b3.button("⌫", key="pk_del", use_container_width=True):
-            if st.session_state["_pin_digits"]:
-                st.session_state["_pin_digits"].pop()
-            st.session_state["_pin_error"] = ""
-
-        # ── Check PIN once 4 digits entered ───────────────────────────────────
-        if len(st.session_state["_pin_digits"]) == 4:
-            entered = "".join(st.session_state["_pin_digits"])
-            if entered == admin_pin:
-                st.session_state["pin_role"] = "admin"
-                st.session_state["_pin_digits"] = []
-                st.session_state["_pin_error"] = ""
-                st.rerun()
-            elif entered == general_pin:
-                st.session_state["pin_role"] = "general"
-                st.session_state["_pin_digits"] = []
-                st.session_state["_pin_error"] = ""
-                st.rerun()
-            else:
-                st.session_state["_pin_error"] = "✗ Incorrect PIN — try again"
-                st.session_state["_pin_digits"] = []
-                st.rerun()
+    st.components.v1.html(html, height=560, scrolling=False)
 
 
 # ── Main app (post-login) ─────────────────────────────────────────────────────
