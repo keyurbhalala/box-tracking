@@ -1622,10 +1622,10 @@ def _get_pins() -> tuple[str, str]:
 
 def _render_pin_screen() -> None:
     """
-    Touch-friendly 4-digit PIN pad rendered as a full-page HTML component.
-    Works correctly on mobile — CSS grid is not subject to Streamlit's
-    responsive column collapsing.
-    Communicates the result back to Python via a hidden text_input bridge.
+    Touch-friendly PIN pad. Communication path:
+      Component JS  →  postMessage(role)  →  window listener (injected via st.markdown)
+      →  sets bridge text_input value  →  Python reads it on next rerun.
+    This bypasses the iframe sandbox that blocks window.parent.document access.
     """
     admin_pin, general_pin = _get_pins()
 
@@ -1634,22 +1634,44 @@ def _render_pin_screen() -> None:
     <style>
       [data-testid="stSidebar"], header, footer { display: none !important; }
       .stApp > div { padding-top: 0 !important; }
-      /* Push bridge input off-screen */
       div[data-testid="stTextInput"] {
-        position: fixed; top: -200px; opacity: 0; pointer-events: none;
+        position: fixed; top: -300px; opacity: 0; pointer-events: none;
       }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Bridge input — rendered BEFORE the component so it's in the DOM ───────
+    # ── postMessage listener injected into the MAIN Streamlit frame ───────────
+    # This runs in the top-level page (not inside the component iframe),
+    # so it CAN safely access the bridge input DOM element.
+    st.markdown("""
+    <script>
+    (function() {
+      if (window._pinListener) window.removeEventListener('message', window._pinListener);
+      window._pinListener = function(e) {
+        var role = e.data && e.data.pinRole;
+        if (role !== 'admin' && role !== 'general') return;
+        var inputs = document.querySelectorAll('input[type="text"]');
+        for (var i = 0; i < inputs.length; i++) {
+          var inp = inputs[i];
+          var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+          setter.call(inp, role);
+          inp.dispatchEvent(new Event('input', {bubbles: true}));
+          break;
+        }
+      };
+      window.addEventListener('message', window._pinListener);
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+    # ── Bridge input — in the main frame, reads the role set by the listener ──
     bridge = st.text_input("_bridge", key="_pin_bridge", label_visibility="collapsed")
     if bridge in ("admin", "general"):
         st.session_state["pin_role"] = bridge
-        # Clear bridge so it doesn't persist on next rerun
         st.session_state["_pin_bridge"] = ""
         st.rerun()
 
-    # ── Full HTML PIN pad ─────────────────────────────────────────────────────
+    # ── HTML PIN pad component ────────────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1660,47 +1682,51 @@ body {{
   background: transparent;
   display: flex; flex-direction: column; align-items: center;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  padding: 24px 16px;
-  min-height: 100vh;
+  padding: 16px;
 }}
-.logo {{ font-size: 42px; margin-bottom: 6px; margin-top: 16px; }}
+.logo  {{ font-size: 40px; margin: 12px 0 4px; }}
 .title {{ font-size: 22px; font-weight: 700; color: #e8e8e8; margin-bottom: 4px; }}
-.sub   {{ font-size: 14px; color: #999; margin-bottom: 32px; }}
-.dots  {{ display: flex; gap: 20px; margin-bottom: 36px; }}
+.sub   {{ font-size: 14px; color: #999; margin-bottom: 28px; }}
+.dots  {{ display: flex; gap: 20px; margin-bottom: 28px; }}
 .dot   {{
   width: 22px; height: 22px; border-radius: 50%;
   background: #2a2a2a; border: 2px solid #555;
   transition: background .15s, border-color .15s;
 }}
-.dot.on {{ background: #1a7f5a; border-color: #1a7f5a; }}
+.dot.on  {{ background: #1a7f5a; border-color: #1a7f5a; }}
 .dot.err {{ background: #c0392b; border-color: #c0392b; }}
 .grid {{
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, 88px);
   gap: 10px;
-  width: 100%;
-  max-width: 280px;
+  margin-bottom: 10px;
 }}
 .key {{
   height: 72px; border-radius: 16px;
-  border: 1.5px solid #2e4057;
-  background: #1e2d3d;
+  border: 1.5px solid #2e4057; background: #1e2d3d;
   color: #e8e8e8; font-size: 28px; font-weight: 600;
   cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  -webkit-tap-highlight-color: transparent;
-  user-select: none;
+  -webkit-tap-highlight-color: transparent; user-select: none;
   transition: background .1s, transform .08s;
   touch-action: manipulation;
 }}
 .key:active {{ background: #1a7f5a; transform: scale(.91); }}
-.key.del {{ background: #2c1a1a; border-color: #4a2020; font-size: 24px; }}
+.key.del    {{ background: #2c1a1a; border-color: #4a2020; font-size: 22px; }}
 .key.del:active {{ background: #7f1a1a; }}
-.key.blank {{ background: transparent; border-color: transparent; pointer-events: none; }}
-.err-msg {{
-  margin-top: 20px; font-size: 14px; color: #f55;
-  min-height: 20px; text-align: center;
+.key.blank  {{ background: transparent; border-color: transparent; pointer-events: none; }}
+.enter {{
+  width: 286px; height: 56px; border-radius: 14px;
+  background: #1a7f5a; border: none;
+  color: #fff; font-size: 18px; font-weight: 600;
+  cursor: pointer; margin-top: 8px;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation; display: none;
+  transition: background .1s;
 }}
+.enter:active {{ background: #145f44; }}
+.enter.show {{ display: block; }}
+.err-msg {{ margin-top: 12px; font-size: 14px; color: #f55; min-height: 20px; text-align: center; }}
 </style>
 </head>
 <body>
@@ -1708,10 +1734,8 @@ body {{
 <div class="title">Shipment Tracker</div>
 <div class="sub">Enter your PIN to continue</div>
 <div class="dots">
-  <div class="dot" id="d0"></div>
-  <div class="dot" id="d1"></div>
-  <div class="dot" id="d2"></div>
-  <div class="dot" id="d3"></div>
+  <div class="dot" id="d0"></div><div class="dot" id="d1"></div>
+  <div class="dot" id="d2"></div><div class="dot" id="d3"></div>
 </div>
 <div class="grid">
   <div class="key" onclick="pk('1')">1</div>
@@ -1727,6 +1751,7 @@ body {{
   <div class="key" onclick="pk('0')">0</div>
   <div class="key del" onclick="pdel()">⌫</div>
 </div>
+<button class="enter" id="enterBtn" onclick="check()">✓ Enter</button>
 <div class="err-msg" id="errmsg"></div>
 
 <script>
@@ -1738,15 +1763,14 @@ function pk(d) {{
   if (pin.length >= 4) return;
   pin += d;
   updateDots();
-  if (pin.length === 4) setTimeout(check, 60);
+  // Show Enter button when 4 digits entered
+  document.getElementById('enterBtn').className = pin.length === 4 ? 'enter show' : 'enter';
 }}
 function pdel() {{
   pin = pin.slice(0, -1);
   updateDots();
   document.getElementById('errmsg').textContent = '';
-  for (var i = 0; i < 4; i++) {{
-    document.getElementById('d' + i).className = 'dot' + (i < pin.length ? ' on' : '');
-  }}
+  document.getElementById('enterBtn').className = pin.length === 4 ? 'enter show' : 'enter';
 }}
 function updateDots() {{
   for (var i = 0; i < 4; i++) {{
@@ -1754,39 +1778,33 @@ function updateDots() {{
   }}
 }}
 function check() {{
+  if (pin.length < 4) return;
   var role = '';
   if (pin === ADMIN)   role = 'admin';
   if (pin === GENERAL) role = 'general';
 
   if (role) {{
-    // Write result into Streamlit's bridge text_input in the parent frame
-    try {{
-      var inputs = window.parent.document.querySelectorAll('input[type="text"]');
-      if (inputs.length > 0) {{
-        var inp = inputs[0];
-        var setter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype, 'value').set;
-        setter.call(inp, role);
-        inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-      }}
-    }} catch(e) {{ console.warn('bridge error', e); }}
+    document.getElementById('enterBtn').textContent = '⏳';
+    // postMessage to parent — works even through iframe sandbox restrictions
+    window.parent.postMessage({{ pinRole: role }}, '*');
   }} else {{
-    // Wrong PIN — flash dots red then clear
     for (var i = 0; i < 4; i++) {{
       document.getElementById('d' + i).className = 'dot err';
     }}
     document.getElementById('errmsg').textContent = '✗ Incorrect PIN — try again';
+    document.getElementById('enterBtn').className = 'enter';
     setTimeout(function() {{
       pin = '';
       updateDots();
-    }}, 600);
+      document.getElementById('errmsg').textContent = '';
+    }}, 800);
   }}
 }}
 </script>
 </body>
 </html>"""
 
-    st.components.v1.html(html, height=560, scrolling=False)
+    st.components.v1.html(html, height=580, scrolling=False)
 
 
 # ── Main app (post-login) ─────────────────────────────────────────────────────
