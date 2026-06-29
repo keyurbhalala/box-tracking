@@ -1494,17 +1494,24 @@ def render_starshipit_diagnostics() -> None:
         "`SERVICE_OPTIONS` in `starshipit.py` accordingly."
     )
 
-    test_order_id = st.text_input("Starshipit order_id (numeric)", value=chosen_id if not recent.empty else "")
-    st.caption("We'll call POST /api/orders/shipment with just the order_id — no carrier/service override.")
+    d_col1, d_col2 = st.columns(2)
+    test_order_id = d_col1.text_input("Starshipit order_id (numeric)", value=chosen_id if not recent.empty else "")
+    test_svc_code = d_col2.selectbox(
+        "carrier_service_code to try",
+        options=["CPOLP", "IWXOLP", "NZREG", "(empty — use stored)"],
+        index=0,
+    )
 
     if st.button("Test Label Endpoint", disabled=not test_order_id):
+        code = "" if test_svc_code == "(empty — use stored)" else test_svc_code
         with st.spinner("Calling POST /api/orders/shipment…"):
-            pdf, err = _submit_for_label(test_order_id, reprint=False)
+            pdf, err = _submit_for_label(test_order_id, reprint=False, carrier_service_code=code)
         if pdf:
-            st.success(f"✅ Label generated! ({len(pdf):,} bytes)")
+            st.success(f"✅ Label generated with `{code or '(none)'}` ({len(pdf):,} bytes) — this is the correct code!")
             st.download_button("Download Test Label", data=pdf, file_name="test_label.pdf", mime="application/pdf")
         else:
             st.error(f"❌ {err}")
+            st.caption("Try a different code from the dropdown.")
 
 
 PAGES = {

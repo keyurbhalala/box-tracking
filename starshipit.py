@@ -37,11 +37,11 @@ STARSHIPIT_API_BASE = "https://api.starshipit.com/api"
 
 NZ_POST_TRACKING_URL = "https://www.nzpost.co.nz/tools/tracking/item/{}"
 
-DEFAULT_SERVICE_CODE = "NZREG"          # NZ Post Standard Tracked
+DEFAULT_SERVICE_CODE = "CPOLP"          # CourierPost standard (NZ Post ParcelLabel code)
 
 SERVICE_OPTIONS: dict[str, str] = {
-    "NZ Post Standard (NZREG)": "NZREG",
-    "NZ Post Express (NZEXP)":  "NZEXP",
+    "CourierPost Standard (CPOLP)": "CPOLP",
+    "ParcelPost Standard (IWXOLP)": "IWXOLP",
 }
 
 # ---------------------------------------------------------------------------
@@ -208,10 +208,7 @@ def _build_payload(
             "order_number": reference,   # required by Starshipit API
             "reference":    reference,
             "carrier_name": "NZ Post Domestic",
-            # service_code intentionally NOT set here — Starshipit concatenates
-            # any value stored on the order with carrier_service_code sent to
-            # POST /api/orders/shipment, producing "NZREG,NZREG" which is invalid.
-            # The service code is set exclusively via the shipment endpoint.
+            "service_code": service_code,  # NZ Post product code e.g. CPOLP
             **_BOOKING_DEFAULTS,
             "sender_details": sender.as_api_dict(),
             "destination":    recipient.as_api_dict(),
@@ -224,6 +221,7 @@ def _build_payload(
 def _submit_for_label(
     order_id: str,
     reprint: bool = False,
+    carrier_service_code: str = "",
 ) -> tuple[bytes, str]:
     """
     POST /api/orders/shipment — submits the order to NZ Post and returns label PDF bytes.
@@ -231,8 +229,8 @@ def _submit_for_label(
     On first call (reprint=False): submits to carrier, moves order to "Printed" in NZ Post.
     On reprint (reprint=True):     fetches previously generated labels.
 
-    Starshipit assigns carrier/service from its account defaults — we send only
-    order_id so we don't override its routing rules.
+    carrier_service_code: the NZ Post product code (e.g. "CPOLP" for CourierPost standard).
+    Stored on the order during POST /api/orders; passed here for override / diagnostics.
 
     The `labels` field in the response is a list of base64-encoded PDF strings,
     one per physical package/box.  We decode and concatenate them.
@@ -243,10 +241,8 @@ def _submit_for_label(
         "order_id": int(order_id),
         "reprint":  reprint,
     }
-    # Do NOT send carrier or carrier_service_code — Starshipit assigns the
-    # service from its account defaults / routing rules.  Passing these
-    # overrides caused "NZREG is invalid" errors because the API does not
-    # accept NZ Post product codes directly; it uses its own internal mapping.
+    if carrier_service_code:
+        body["carrier_service_code"] = carrier_service_code
 
     try:
         resp = requests.post(
@@ -329,11 +325,13 @@ def create_order(
             # ── Step 2: submit to carrier and generate label ──────────────
             # POST /api/orders only creates a draft; POST /api/orders/shipment
             # actually submits to NZ Post and returns base64 label PDFs.
-            # We send only order_id — Starshipit uses its configured defaults.
+            # Pass the service_code so Starshipit knows the NZ Post product.
             label_pdf  = b""
             label_error = ""
             if order_id:
-                label_pdf, label_error = _submit_for_label(order_id, reprint=False)
+                label_pdf, label_error = _submit_for_label(
+                    order_id, reprint=False, carrier_service_code=actual_svc
+                )
                 if label_error:
                     log.warning("Label generation failed for %s: %s", reference, label_error)
 
