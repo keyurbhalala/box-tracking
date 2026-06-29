@@ -66,7 +66,7 @@ _BOOKING_DEFAULTS: dict[str, bool] = {
 
 @dataclass
 class Address:
-    name: str
+    name: str       # contact person's name ("Name" field in Starshipit)
     phone: str
     street: str
     city: str
@@ -75,6 +75,7 @@ class Address:
     email: str = ""
     suburb: str = ""
     building: str = ""
+    company: str = ""  # business/company name ("Company" field in Starshipit)
 
     def as_api_dict(self) -> dict[str, Any]:
         """Format for Starshipit API request body."""
@@ -91,6 +92,8 @@ class Address:
             "post_code": self.postcode,
             "country":   self.country,
         }
+        if self.company:
+            d["company"] = self.company
         if self.suburb:
             d["suburb"] = self.suburb
         if self.email:
@@ -155,14 +158,18 @@ def _build_payload(
     reference: str,
     service_code: str,
 ) -> dict[str, Any]:
+    # Starshipit API expects dimensions in METRES. Users enter cm → divide by 100.
+    def _cm_to_m(val: float) -> float:
+        return round(val / 100, 4)
+
     if package.per_box_dims:
         # Each physical box has its own dimensions — send as individual package entries.
         packages_list = [
             {
                 "weight":   float(d.get("weight") or 1.0),
-                "length":   float(d.get("length") or 30.0),
-                "width":    float(d.get("width")  or 20.0),
-                "height":   float(d.get("height") or 15.0),
+                "length":   _cm_to_m(float(d.get("length") or 30.0)),
+                "width":    _cm_to_m(float(d.get("width")  or 20.0)),
+                "height":   _cm_to_m(float(d.get("height") or 15.0)),
                 "quantity": 1,
             }
             for d in package.per_box_dims
@@ -173,9 +180,9 @@ def _build_payload(
         packages_list = [
             {
                 "weight":   total_weight,
-                "length":   package.length,
-                "width":    package.width,
-                "height":   package.height,
+                "length":   _cm_to_m(package.length),
+                "width":    _cm_to_m(package.width),
+                "height":   _cm_to_m(package.height),
                 "quantity": package.boxes,
             }
         ]

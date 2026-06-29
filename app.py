@@ -270,7 +270,8 @@ def _build_courier_stores(
             )
         else:
             recipient = Address(
-                name=store.get("company_name") or d["store_name"],
+                name=store.get("contact_name") or store.get("company_name") or d["store_name"],
+                company=store.get("company_name") or d["store_name"],
                 phone=store.get("phone") or "",
                 street=store.get("street") or "",
                 suburb=store.get("suburb") or "",

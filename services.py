@@ -974,7 +974,8 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
         email=warehouse.get("email", ""),
     )
     recipient = Address(
-        name=store.get("company_name") or booking["store_name"],
+        name=store.get("contact_name") or store.get("company_name") or booking["store_name"],
+        company=store.get("company_name") or booking["store_name"],
         phone=store.get("phone") or "",
         street=store.get("street") or "",
         suburb=store.get("suburb") or "",
