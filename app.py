@@ -308,6 +308,21 @@ def _build_courier_stores(
         progress.progress((i + 1) / len(details), text=f"Booked {d['store_name']}…")
 
     progress.empty()
+
+    # ── Generate printable labels for all successfully booked stores ──────────
+    booked_results = [r for r in results if r.success and r.consignment_id]
+    if booked_results:
+        from starshipit import generate_labels
+        order_ids = [r.consignment_id for r in booked_results]
+        label_progress = st.progress(0, text="Generating labels…")
+        combined_label_url, label_err = generate_labels(order_ids)
+        label_progress.empty()
+        if combined_label_url:
+            st.session_state["_last_combined_label_url"] = combined_label_url
+        elif label_err:
+            log.warning("Label generation failed: %s", label_err)
+            st.session_state.pop("_last_combined_label_url", None)
+
     return results
 
 
@@ -330,6 +345,24 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
             "Use **Retry** in Shipment History to rebook."
         )
 
+    # ── Combined "Print All Labels" button ────────────────────────────────────
+    combined_url = st.session_state.get("_last_combined_label_url", "")
+    if combined_url and booked:
+        st.link_button(
+            f"🖨 Print All Labels ({len(booked)} store{'s' if len(booked) != 1 else ''})",
+            combined_url,
+            type="primary",
+            use_container_width=True,
+        )
+    elif booked:
+        # Labels endpoint didn't return a combined URL — fall back to per-store
+        individual_urls = [r.label_url for r in booked if r.label_url]
+        if individual_urls:
+            st.info(
+                "Labels available individually below. "
+                "Click each store's 🖨 Label button to open."
+            )
+
     for r in results:
         with st.container(border=True):
             c1, c2, c3, c4 = st.columns([3, 3, 2, 2])
@@ -340,6 +373,8 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                 link_col1, link_col2 = c4.columns(2)
                 if r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
+                elif combined_url:
+                    link_col1.link_button("🖨 Labels", combined_url, use_container_width=True)
                 if r.tracking_number:
                     link_col2.link_button("📦 Track", tracking_url(r.tracking_number), use_container_width=True)
             else:

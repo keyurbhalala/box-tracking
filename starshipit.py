@@ -48,15 +48,16 @@ SERVICE_OPTIONS: dict[str, str] = {
 # Business rules — applied to every booking, invisible to UI
 # ---------------------------------------------------------------------------
 
-_BOOKING_DEFAULTS: dict[str, bool] = {
-    "signature_required":  True,
-    "authority_to_leave":  False,
-    "dangerous_goods":     False,
-    "saturday_delivery":   False,
-    "photo_required":      False,
-    "create_return":       False,
-    "age_restricted":      False,
-    "insurance":           False,
+_BOOKING_DEFAULTS: dict[str, Any] = {
+    "signature_required":     True,
+    "authority_to_leave":     False,   # Don't allow leaving without signature
+    "no_authority_to_leave":  True,    # Explicit "No ATL" checkbox in Starshipit UI
+    "dangerous_goods":        False,
+    "saturday_delivery":      False,
+    "photo_required":         False,
+    "create_return":          False,
+    "age_restricted":         False,
+    "insurance":              False,
 }
 
 # ---------------------------------------------------------------------------
@@ -303,3 +304,70 @@ def create_order(
 def tracking_url(tracking_number: str) -> str:
     """Return NZ Post tracking URL for a given tracking number."""
     return NZ_POST_TRACKING_URL.format(tracking_number)
+
+
+def generate_labels(order_ids: list[str]) -> tuple[str, str]:
+    """
+    Request Starshipit to generate printable label PDFs for the given order IDs.
+
+    Starshipit requires a separate POST /api/labels call after order creation —
+    the order creation endpoint does not always return a ready-to-print label URL.
+
+    Args:
+        order_ids: Starshipit order IDs (as strings) from BookingResult.consignment_id
+
+    Returns:
+        (label_url, error_message) — label_url is a combined PDF URL if successful,
+        empty string on failure; error_message is empty on success.
+    """
+    if not order_ids:
+        return "", "No order IDs provided"
+
+    clean_ids = [oid for oid in order_ids if oid]
+    if not clean_ids:
+        return "", "No valid order IDs"
+
+    log.info("Starshipit generate_labels for order_ids=%s", clean_ids)
+    try:
+        resp = requests.post(
+            f"{STARSHIPIT_API_BASE}/labels",
+            headers=_headers(),
+            json={"order_ids": [int(oid) for oid in clean_ids]},
+            timeout=30,
+        )
+        raw = resp.text
+        log.debug("Starshipit labels response [%s]: %.500s", resp.status_code, raw)
+        data = resp.json()
+
+        if resp.ok and data.get("success"):
+            # Starshipit returns the combined label PDF URL under various keys
+            url = (
+                data.get("url")
+                or data.get("label_url")
+                or data.get("labels_url")
+                or ""
+            )
+            # Some versions return a list of label objects
+            if not url and data.get("labels"):
+                labels = data["labels"]
+                if isinstance(labels, list) and labels:
+                    url = labels[0].get("url") or labels[0].get("label_url") or ""
+            return url, ""
+
+        errors = data.get("errors") or []
+        msg = (
+            "; ".join(e.get("description", str(e)) for e in errors)
+            if errors
+            else data.get("message", f"HTTP {resp.status_code}")
+        )
+        return "", msg
+
+    except requests.exceptions.Timeout:
+        return "", "Label request timed out (30 s)"
+    except requests.exceptions.ConnectionError as exc:
+        return "", f"Connection error: {exc}"
+    except RuntimeError as exc:
+        return "", str(exc)
+    except Exception as exc:
+        log.exception("Unexpected error generating labels")
+        return "", str(exc)

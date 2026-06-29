@@ -997,6 +997,14 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
 
     result = create_order(sender, recipient, pkg, ref, svc)
 
+    # If the order was created successfully, generate a printable label immediately.
+    label_url = result.label_url or ""
+    if result.success and result.consignment_id:
+        from starshipit import generate_labels
+        gen_url, gen_err = generate_labels([result.consignment_id])
+        if gen_url:
+            label_url = gen_url
+
     with connection() as conn:
         conn.execute(
             """
@@ -1009,7 +1017,7 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
             """,
             (
                 result.tracking_number or None,
-                result.label_url or None,
+                label_url or None,
                 result.consignment_id or None,
                 result.carrier or None,
                 result.service_code or None,
