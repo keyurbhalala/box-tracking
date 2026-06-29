@@ -84,12 +84,18 @@ class Address:
             if self.building
             else self.street
         )
+        # Postcodes imported via CSV/Excel often arrive as floats (e.g. 1010.0).
+        # Strip the redundant decimal so NZ Post receives "1010" not "1010.0".
+        pc = str(self.postcode).strip()
+        if pc.endswith(".0"):
+            pc = pc[:-2]
+
         d: dict[str, Any] = {
             "name":      self.name,
             "phone":     self.phone,
             "street":    street,
             "city":      self.city,
-            "post_code": self.postcode,
+            "post_code": pc,
             "country":   self.country,
         }
         if self.company:

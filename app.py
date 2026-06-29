@@ -1184,6 +1184,9 @@ def render_address_book() -> None:
 
                     def _s(col: str, default: str = "") -> str | None:
                         v = str(row.get(col) or "").strip()
+                        # Pandas reads numeric columns (e.g. PostCode) as float → strip ".0"
+                        if v.endswith(".0"):
+                            v = v[:-2]
                         return v if v and v.lower() not in ("nan", "none") else (default or None)
 
                     records.append({
