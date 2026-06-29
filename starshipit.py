@@ -429,21 +429,54 @@ def tracking_url(tracking_number: str) -> str:
 
 def get_order_details(order_id: str) -> dict:
     """
-    GET /api/orders/{order_id} — fetch a Starshipit order and return its full dict.
-    Use this to inspect what service_code / carrier Starshipit stored on the order.
+    Fetch a Starshipit order by its numeric order_id.
+    Tries GET /api/orders?order_id=... (list endpoint filtered by id)
+    because GET /api/orders/{id} returns 404 on some accounts.
     """
     try:
+        # Try list endpoint filtered by order_id first
         resp = requests.get(
+            f"{STARSHIPIT_API_BASE}/orders",
+            headers=_headers(),
+            params={"order_id": order_id, "limit": 1},
+            timeout=30,
+        )
+        log.info("Starshipit GET orders?order_id=%s [%s]: %.2000s", order_id, resp.status_code, resp.text)
+        data = resp.json()
+        orders = data.get("orders") or []
+        if orders:
+            return orders[0]
+        # Fallback: try path-based endpoint
+        resp2 = requests.get(
             f"{STARSHIPIT_API_BASE}/orders/{order_id}",
             headers=_headers(),
             timeout=30,
         )
-        log.info("Starshipit GET order [%s]: %.2000s", resp.status_code, resp.text)
-        data = resp.json()
-        return data.get("order") or data
+        log.info("Starshipit GET order/%s [%s]: %.2000s", order_id, resp2.status_code, resp2.text)
+        data2 = resp2.json()
+        return data2.get("order") or data2
     except Exception as exc:
         log.exception("Error fetching order %s", order_id)
         return {"error": str(exc)}
+
+
+def list_available_services() -> list[dict]:
+    """
+    GET /api/carriers — return all carrier/service combinations configured for this account.
+    Use this in diagnostics to discover valid carrier_service_code values.
+    """
+    try:
+        resp = requests.get(
+            f"{STARSHIPIT_API_BASE}/carriers",
+            headers=_headers(),
+            timeout=30,
+        )
+        log.info("Starshipit GET carriers [%s]: %.3000s", resp.status_code, resp.text)
+        data = resp.json()
+        return data.get("carriers") or data.get("services") or [data]
+    except Exception as exc:
+        log.exception("Error listing carriers")
+        return [{"error": str(exc)}]
 
 
 def generate_labels(order_id: str) -> tuple[bytes, str]:

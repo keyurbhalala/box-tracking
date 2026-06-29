@@ -1425,8 +1425,17 @@ def render_address_book() -> None:
 
 
 def render_starshipit_diagnostics() -> None:
-    from starshipit import get_order_details, _submit_for_label
+    from starshipit import get_order_details, _submit_for_label, list_available_services
     hero("Starshipit Diagnostics", "Inspect orders and find the correct carrier service code")
+
+    # ── Step 0: List all configured carriers and service codes ────────────────
+    st.subheader("Step 0 — Available carriers & service codes")
+    st.caption("Shows every carrier/service configured for this Starshipit account. Use these codes in Step 2.")
+    if st.button("List Available Services", key="list_services"):
+        with st.spinner("Calling GET /api/carriers…"):
+            services = list_available_services()
+        st.json(services)
+    st.divider()
 
     # ── Step 1: Inspect a recent order to see what Starshipit stored ─────────
     st.subheader("Step 1 — Inspect a recent order")
