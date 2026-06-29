@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+log = logging.getLogger(__name__)
 
 _NZ = ZoneInfo("Pacific/Auckland")
 
