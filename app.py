@@ -1598,12 +1598,186 @@ PAGES = {
     "Starshipit Diagnostics": render_starshipit_diagnostics,
 }
 
+# Pages visible to general (non-admin) PIN holders
+GENERAL_PAGES = [
+    "Dashboard",
+    "New Shipment",
+    "Delivery Run",
+    "History & Edit",
+    "Store Lookup",
+]
+
+
+# ── PIN Authentication ────────────────────────────────────────────────────────
+
+def _get_pins() -> tuple[str, str]:
+    """Read ADMIN_PIN and GENERAL_PIN from secrets. Falls back to safe defaults."""
+    try:
+        admin  = str(st.secrets.get("ADMIN_PIN",   "1234"))
+        general = str(st.secrets.get("GENERAL_PIN", "0000"))
+    except Exception:
+        admin, general = "1234", "0000"
+    return admin, general
+
+
+def _render_pin_screen() -> None:
+    """Full-page touch-friendly 4-digit PIN pad. Sets st.session_state.pin_role on success."""
+    st.markdown("""
+    <style>
+      /* Hide Streamlit chrome while on PIN screen */
+      [data-testid="stSidebar"], header, footer { display: none !important; }
+      .pin-wrap {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; min-height: 80vh; gap: 0;
+      }
+      .pin-title  { font-size: 28px; font-weight: 700; color: #e8e8e8; margin-bottom: 6px; }
+      .pin-sub    { font-size: 15px; color: #aaa; margin-bottom: 28px; }
+      .pin-dots   {
+        display: flex; gap: 16px; margin-bottom: 32px;
+      }
+      .pin-dot {
+        width: 18px; height: 18px; border-radius: 50%;
+        background: #444; border: 2px solid #666; transition: background .15s;
+      }
+      .pin-dot.filled { background: #1a7f5a; border-color: #1a7f5a; }
+      .pin-grid {
+        display: grid; grid-template-columns: repeat(3, 80px);
+        gap: 12px; margin-bottom: 16px;
+      }
+      .pin-key {
+        width: 80px; height: 80px; border-radius: 14px;
+        background: #1e2d3d; border: 1.5px solid #2e4057;
+        color: #e8e8e8; font-size: 28px; font-weight: 600;
+        cursor: pointer; display: flex; align-items: center;
+        justify-content: center; user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        transition: background .1s, transform .1s;
+        box-shadow: 0 2px 6px #0004;
+      }
+      .pin-key:active { background: #1a7f5a; transform: scale(.93); }
+      .pin-key.del    { background: #2c1a1a; border-color: #4a2020; font-size: 22px; }
+      .pin-key.del:active { background: #7f1a1a; }
+      .pin-error { color: #f55; font-size: 14px; margin-top: 8px; min-height: 20px; text-align:center; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Component handles PIN entry entirely in JS; posts back via query param trick
+    uid = "pinpad"
+    admin_pin, general_pin = _get_pins()
+
+    # We use a hidden Streamlit text_input as the bridge: JS fills it, Streamlit reads it.
+    # The component renders the visual pad; a hidden real input carries the value.
+    entered = st.session_state.get("_pin_entered", "")
+
+    html = f"""
+    <div class="pin-wrap">
+      <div class="pin-title">📦 Shipment Tracker</div>
+      <div class="pin-sub">Enter your PIN to continue</div>
+      <div class="pin-dots" id="dots_{uid}">
+        <div class="pin-dot" id="d0"></div>
+        <div class="pin-dot" id="d1"></div>
+        <div class="pin-dot" id="d2"></div>
+        <div class="pin-dot" id="d3"></div>
+      </div>
+      <div class="pin-grid">
+        {''.join(f'<div class="pin-key" onclick="pk(\\'{d}\\')">{d}</div>' for d in ['1','2','3','4','5','6','7','8','9'])}
+        <div class="pin-key" onclick="pk('0')">0</div>
+        <div class="pin-key del" onclick="pdel()">⌫</div>
+      </div>
+      <div class="pin-error" id="perr_{uid}"></div>
+    </div>
+
+    <script>
+    var _pin = '';
+    var ADMIN   = '{admin_pin}';
+    var GENERAL = '{general_pin}';
+
+    function pk(d) {{
+      if(_pin.length >= 4) return;
+      _pin += d;
+      _updateDots();
+      if(_pin.length === 4) _check();
+    }}
+    function pdel() {{
+      _pin = _pin.slice(0, -1);
+      _updateDots();
+      document.getElementById('perr_{uid}').textContent = '';
+    }}
+    function _updateDots() {{
+      for(var i=0;i<4;i++) {{
+        var el = document.getElementById('d'+i);
+        if(el) el.className = 'pin-dot' + (i < _pin.length ? ' filled' : '');
+      }}
+    }}
+    function _check() {{
+      if(_pin === ADMIN || _pin === GENERAL) {{
+        // Write to the hidden Streamlit input and trigger rerun
+        var role = (_pin === ADMIN) ? 'admin' : 'general';
+        // Find the hidden input Streamlit rendered and set its value
+        var inputs = window.parent.document.querySelectorAll('input[type=text]');
+        for(var i=0; i<inputs.length; i++) {{
+          if(inputs[i].dataset.pinbridge === 'true') {{
+            var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(inputs[i], role);
+            inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+            break;
+          }}
+        }}
+      }} else {{
+        document.getElementById('perr_{uid}').textContent = '✗ Incorrect PIN — try again';
+        _pin = '';
+        setTimeout(function(){{_updateDots();}}, 50);
+      }}
+    }}
+    </script>
+    """
+    st.components.v1.html(html, height=520, scrolling=False)
+
+    # Hidden bridge input — JS writes role ('admin'|'general') into it
+    # We mark it with a data attribute so JS can find it
+    st.markdown("""
+    <script>
+    // Tag the Streamlit input so JS in the component can target it
+    (function tag() {
+      var inputs = document.querySelectorAll('input[type=text]');
+      inputs.forEach(function(el) {
+        if (el.closest('[data-testid="stTextInput"]')) el.setAttribute('data-pinbridge','true');
+      });
+      if (!inputs.length) setTimeout(tag, 200);
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
+    bridge = st.text_input("pin_bridge", value="", key="_pin_bridge",
+                           label_visibility="collapsed")
+    if bridge in ("admin", "general"):
+        st.session_state["pin_role"] = bridge
+        st.session_state["_pin_bridge"] = ""
+        st.rerun()
+
+
+# ── Main app (post-login) ─────────────────────────────────────────────────────
+
+if "pin_role" not in st.session_state:
+    _render_pin_screen()
+    st.stop()
+
+role = st.session_state["pin_role"]
+visible_pages = PAGES if role == "admin" else {k: PAGES[k] for k in GENERAL_PAGES}
+
 with st.sidebar:
     st.markdown("## 📦 Shipment Tracker")
     st.caption("Wholesale distribution")
-    page = st.radio("Navigation", list(PAGES), label_visibility="collapsed")
+    page = st.radio("Navigation", list(visible_pages), label_visibility="collapsed")
     st.divider()
+    if role == "admin":
+        st.caption("🔑 Admin")
+    else:
+        st.caption("👤 General")
+    if st.button("🔒 Lock", use_container_width=True):
+        del st.session_state["pin_role"]
+        st.rerun()
     st.caption("Data stored in Supabase and backed by an audit trail.")
 
-PAGES[page]()
+visible_pages[page]()
 
