@@ -256,12 +256,13 @@ def _submit_for_label(
         "order_id": int(order_id),
         "reprint":  reprint,
     }
-    # Only include carrier fields if we have them — the order already carries
-    # these details so Starshipit can infer them when order_id is provided.
+    # When order_id is provided, Starshipit already knows the carrier and
+    # service_code from the existing order.  Sending carrier_service_code
+    # causes Starshipit to concatenate it with the stored value → "NZREG,NZREG"
+    # error.  Only include carrier (not service_code) if explicitly needed.
     if carrier:
         body["carrier"] = carrier
-    if service_code:
-        body["carrier_service_code"] = service_code
+    # DO NOT send carrier_service_code — omit it entirely.
     if expanded:
         body["packages"] = expanded
 
