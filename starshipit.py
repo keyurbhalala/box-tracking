@@ -181,7 +181,8 @@ def _build_payload(
         ]
     return {
         "order": {
-            "reference":    reference,
+            "order_number": reference,   # required by Starshipit API
+            "reference":    reference,   # optional customer reference (same value)
             "carrier_name": "NZ Post",
             "service_code": service_code,
             **_BOOKING_DEFAULTS,
