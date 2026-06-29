@@ -365,6 +365,9 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                     )
                 elif r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
+                elif r.label_error:
+                    # Show the label error inline so it's visible (not just in logs)
+                    c4.warning(f"Label failed: {r.label_error[:120]}")
 
                 if r.tracking_number:
                     link_col2.link_button("📦 Track", tracking_url(r.tracking_number), use_container_width=True)

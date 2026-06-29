@@ -129,7 +129,8 @@ class BookingResult:
     boxes: int
     tracking_number: str = ""
     label_url: str = ""
-    label_pdf: bytes = b""    # decoded PDF from POST /api/orders/shipment
+    label_pdf: bytes = b""       # decoded PDF from POST /api/orders/shipment
+    label_error: str = ""        # non-empty if label generation failed (separate from booking)
     consignment_id: str = ""
     carrier: str = ""
     service_code: str = ""
@@ -219,6 +220,7 @@ def _build_payload(
 
 def _submit_for_label(
     order_id: str,
+    carrier: str,
     service_code: str,
     packages_list: list[dict[str, Any]],
     reprint: bool = False,
@@ -228,6 +230,9 @@ def _submit_for_label(
 
     On first call (reprint=False): submits to carrier, moves order to "Printed" in NZ Post.
     On reprint (reprint=True):     fetches previously generated labels.
+
+    carrier / service_code: pass the values returned by POST /api/orders (not user-entered),
+    so Starshipit gets the exact internal names it assigned.  Pass empty strings to omit.
 
     The `labels` field in the response is a list of base64-encoded PDF strings,
     one per physical package/box.  We decode and concatenate them.
@@ -239,29 +244,39 @@ def _submit_for_label(
     expanded: list[dict] = []
     for pkg in packages_list:
         qty = int(pkg.get("quantity", 1))
-        base = {k: v for k, v in pkg.items() if k != "quantity"}
+        base_pkg = {k: v for k, v in pkg.items() if k != "quantity"}
         if qty > 1:
-            # Split total weight equally across boxes
-            per_box_w = round(base.get("weight", 1.0) / qty, 3)
+            per_box_w = round(base_pkg.get("weight", 1.0) / qty, 3)
             for _ in range(qty):
-                expanded.append({**base, "weight": per_box_w})
+                expanded.append({**base_pkg, "weight": per_box_w})
         else:
-            expanded.append(base)
+            expanded.append(base_pkg)
+
+    body: dict[str, Any] = {
+        "order_id": int(order_id),
+        "reprint":  reprint,
+    }
+    # Only include carrier fields if we have them — the order already carries
+    # these details so Starshipit can infer them when order_id is provided.
+    if carrier:
+        body["carrier"] = carrier
+    if service_code:
+        body["carrier_service_code"] = service_code
+    if expanded:
+        body["packages"] = expanded
 
     try:
         resp = requests.post(
             f"{STARSHIPIT_API_BASE}/orders/shipment",
             headers=_headers(),
-            json={
-                "order_id":            int(order_id),
-                "carrier":             "NZ Post",
-                "carrier_service_code": service_code,
-                "packages":            expanded,
-                "reprint":             reprint,
-            },
+            json=body,
             timeout=30,
         )
-        log.debug("Starshipit shipment label [%s]: %.500s", resp.status_code, resp.text)
+        # Always log full response so errors are visible in Streamlit Cloud logs
+        log.info(
+            "Starshipit shipment label order_id=%s reprint=%s status=%s body=%s",
+            order_id, reprint, resp.status_code, resp.text[:1000],
+        )
         data = resp.json()
 
         if data.get("success") and data.get("labels"):
@@ -272,7 +287,7 @@ def _submit_for_label(
         msg = (
             "; ".join(e.get("description", str(e)) for e in errors)
             if errors
-            else data.get("message", f"No labels in response (HTTP {resp.status_code})")
+            else data.get("message", f"No labels in response (HTTP {resp.status_code}): {resp.text[:200]}")
         )
         return b"", msg
 
@@ -316,21 +331,31 @@ def create_order(
         data = resp.json()
 
         if resp.ok and data.get("success"):
-            order      = data.get("order", {})
-            pkgs       = order.get("packages", [])
-            tracking   = pkgs[0].get("tracking_number", "") if pkgs else ""
-            order_id   = str(order.get("order_id", ""))
+            order          = data.get("order", {})
+            pkgs           = order.get("packages", [])
+            tracking       = pkgs[0].get("tracking_number", "") if pkgs else ""
+            order_id       = str(order.get("order_id", ""))
+            # Use the exact carrier name / service code Starshipit assigned —
+            # these must match what the shipment endpoint expects.
+            actual_carrier = order.get("carrier_name", "")
+            actual_svc     = order.get("service_code", service_code)
 
-            # ── Step 2: submit to NZ Post and generate label ──────────────
-            # POST /api/orders only creates a draft; /api/orders/shipment
-            # actually submits to the carrier and returns base64 label PDFs.
-            label_pdf = b""
+            log.info(
+                "Order created: order_id=%s carrier='%s' service='%s' tracking='%s'",
+                order_id, actual_carrier, actual_svc, tracking,
+            )
+
+            # ── Step 2: submit to carrier and generate label ──────────────
+            # POST /api/orders only creates a draft; POST /api/orders/shipment
+            # actually submits to NZ Post and returns base64 label PDFs.
+            label_pdf  = b""
+            label_error = ""
             if order_id:
-                label_pdf, lbl_err = _submit_for_label(
-                    order_id, service_code, packages_list, reprint=False
+                label_pdf, label_error = _submit_for_label(
+                    order_id, actual_carrier, actual_svc, packages_list, reprint=False
                 )
-                if lbl_err:
-                    log.warning("Label generation failed for %s: %s", reference, lbl_err)
+                if label_error:
+                    log.warning("Label generation failed for %s: %s", reference, label_error)
 
             return BookingResult(
                 success=True,
@@ -339,9 +364,10 @@ def create_order(
                 tracking_number=tracking,
                 label_url=order.get("label_url", ""),
                 label_pdf=label_pdf,
+                label_error=label_error,
                 consignment_id=order_id,
-                carrier=order.get("carrier_name", "NZ Post"),
-                service_code=order.get("service_code", service_code),
+                carrier=actual_carrier or "NZ Post",
+                service_code=actual_svc,
                 booking_status="Booked",
                 booked_at=datetime.utcnow().isoformat(timespec="seconds"),
                 api_response=raw[:10_000],
@@ -407,4 +433,4 @@ def generate_labels(order_id: str) -> tuple[bytes, str]:
     if not order_id:
         return b"", "No order ID provided"
     log.info("Starshipit reprint labels for order_id=%s", order_id)
-    return _submit_for_label(order_id, "", [], reprint=True)
+    return _submit_for_label(order_id, carrier="", service_code="", packages_list=[], reprint=True)
