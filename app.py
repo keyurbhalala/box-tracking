@@ -322,19 +322,69 @@ def _build_courier_stores(
     return results
 
 
-def _show_label_inline(pdf_bytes: bytes, key: str) -> None:
+PRINT_SERVER_URL = "http://localhost:8765"
+
+
+def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC42d (203 dpi)") -> None:
     """
-    Embeds the label PDF directly in the page using the browser's native PDF viewer.
-    The viewer toolbar has a Print button — user clicks it to pick their printer.
-    No JS tricks needed; works reliably on Streamlit Cloud.
+    Sends the PDF directly to the label printer via the local print server.
+    The browser fetches http://localhost:8765/print — Chrome allows HTTP
+    requests to localhost from HTTPS pages (mixed-content exception).
+    Falls back to a download button if the print server is unreachable.
     """
-    import base64
+    import base64, hashlib
     b64 = base64.b64encode(pdf_bytes).decode()
-    st.components.v1.html(
-        f'<embed src="data:application/pdf;base64,{b64}" '
-        f'type="application/pdf" width="100%" height="480px" />',
-        height=490,
-    )
+    uid = hashlib.md5(key.encode()).hexdigest()[:8]
+    printer_js = printer.replace("\\", "\\\\").replace("'", "\\'")
+    html = f"""
+    <style>
+      .ps-btn {{
+        background:#1a7f5a; color:#fff; border:none; border-radius:6px;
+        padding:6px 14px; font-size:14px; cursor:pointer; width:100%;
+        font-family:sans-serif; font-weight:500;
+      }}
+      .ps-btn:hover {{ background:#145f44; }}
+      .ps-btn:disabled {{ background:#555; cursor:not-allowed; }}
+      .ps-msg {{ font-size:12px; margin-top:4px; font-family:sans-serif; }}
+    </style>
+    <button class="ps-btn" id="pb_{uid}" onclick="(async function(){{
+      var btn = document.getElementById('pb_{uid}');
+      var msg = document.getElementById('pm_{uid}');
+      btn.disabled = true;
+      btn.textContent = '⏳ Sending...';
+      msg.textContent = '';
+      try {{
+        var raw = atob('{b64}');
+        var arr = new Uint8Array(raw.length);
+        for(var i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+        var blob = new Blob([arr], {{type:'application/pdf'}});
+        var resp = await fetch('{PRINT_SERVER_URL}/print?printer={printer_js}', {{
+          method:'POST', body:blob,
+          headers:{{'Content-Type':'application/pdf'}}
+        }});
+        var data = await resp.json();
+        if(data.success){{
+          btn.textContent = '✅ Printed!';
+          msg.style.color='#4caf50';
+          msg.textContent = 'Label sent to printer.';
+          setTimeout(function(){{btn.textContent='🖨 Print Label';btn.disabled=false;msg.textContent='';}},3000);
+        }} else {{
+          throw new Error(data.error || 'Unknown error');
+        }}
+      }} catch(e) {{
+        btn.textContent = '🖨 Print Label';
+        btn.disabled = false;
+        msg.style.color='#f44';
+        if(e.message && e.message.includes('fetch')){{
+          msg.textContent = '⚠ Print server offline — run start_print_server.bat on warehouse PC';
+        }} else {{
+          msg.textContent = '❌ ' + e.message;
+        }}
+      }}
+    }})()">🖨 Print Label</button>
+    <div class="ps-msg" id="pm_{uid}"></div>
+    """
+    st.components.v1.html(html, height=65)
 
 
 def _render_courier_results(shipment_id: int, results: list) -> None:
@@ -367,18 +417,10 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                 c3.markdown(f"{r.carrier}  \n`{r.service_code}`")
                 link_col1, link_col2 = c4.columns(2)
 
-                # Prefer freshly-fetched PDF bytes; fall back to label_url from order creation
                 pdf_bytes = store_labels.get(r.consignment_id)
                 if pdf_bytes:
-                    safe_name = r.store_name.replace(" ", "_").lower()
-                    link_col1.download_button(
-                        "🖨 Print Label",
-                        data=pdf_bytes,
-                        file_name=f"label_{safe_name}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key=f"lbl_{r.consignment_id}",
-                    )
+                    with link_col1:
+                        _print_label_button(pdf_bytes, key=f"lbl_{r.consignment_id}")
                 elif r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
                 elif r.label_error:
