@@ -312,23 +312,22 @@ def _build_courier_stores(
 
     progress.empty()
 
-    # ── Generate printable labels for all successfully booked stores ──────────
+    # ── Fetch printable labels for each successfully booked store ────────────
+    # Labels come from POST /api/orders/shipment with reprint=True.
+    # The response contains base64-encoded PDFs (one per box/package).
     booked_results = [r for r in results if r.success and r.consignment_id]
-    # Clear previous label state
-    st.session_state.pop("_label_pdf_bytes", None)
-    st.session_state.pop("_label_url", None)
+    st.session_state["_store_labels"] = {}   # {consignment_id: pdf_bytes}
     if booked_results:
         from starshipit import generate_labels
-        order_ids = [r.consignment_id for r in booked_results]
-        label_progress = st.progress(0, text="Generating labels…")
-        label_result, label_err = generate_labels(order_ids)
-        label_progress.empty()
-        if isinstance(label_result, bytes) and label_result:
-            st.session_state["_label_pdf_bytes"] = label_result
-        elif isinstance(label_result, str) and label_result:
-            st.session_state["_label_url"] = label_result
-        else:
-            log.warning("Label generation failed: %s", label_err)
+        lbl_progress = st.progress(0, text="Fetching labels…")
+        for i, r in enumerate(booked_results):
+            pdf_bytes, lbl_err = generate_labels(r.consignment_id)
+            if pdf_bytes:
+                st.session_state["_store_labels"][r.consignment_id] = pdf_bytes
+            else:
+                log.warning("Label fetch failed for %s: %s", r.store_name, lbl_err)
+            lbl_progress.progress((i + 1) / len(booked_results), text=f"Label for {r.store_name}…")
+        lbl_progress.empty()
 
     return results
 
@@ -352,22 +351,7 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
             "Use **Retry** in Shipment History to rebook."
         )
 
-    # ── Combined label download/print button ──────────────────────────────────
-    label_pdf  = st.session_state.get("_label_pdf_bytes")
-    label_url  = st.session_state.get("_label_url", "")
-    n_booked   = len(booked)
-    btn_label  = f"🖨 Download Labels ({n_booked} store{'s' if n_booked != 1 else ''})"
-    if label_pdf and booked:
-        st.download_button(
-            btn_label,
-            data=label_pdf,
-            file_name="shipment_labels.pdf",
-            mime="application/pdf",
-            type="primary",
-            use_container_width=True,
-        )
-    elif label_url and booked:
-        st.link_button(btn_label, label_url, type="primary", use_container_width=True)
+    store_labels: dict = st.session_state.get("_store_labels", {})
 
     for r in results:
         with st.container(border=True):
@@ -377,10 +361,22 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                 c2.code(r.tracking_number, language=None)
                 c3.markdown(f"{r.carrier}  \n`{r.service_code}`")
                 link_col1, link_col2 = c4.columns(2)
-                if r.label_url:
+
+                # Prefer freshly-fetched PDF bytes; fall back to label_url from order creation
+                pdf_bytes = store_labels.get(r.consignment_id)
+                if pdf_bytes:
+                    safe_name = r.store_name.replace(" ", "_").lower()
+                    link_col1.download_button(
+                        "🖨 Label",
+                        data=pdf_bytes,
+                        file_name=f"label_{safe_name}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key=f"lbl_{r.consignment_id}",
+                    )
+                elif r.label_url:
                     link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
-                elif label_url:
-                    link_col1.link_button("🖨 Labels", label_url, use_container_width=True)
+
                 if r.tracking_number:
                     link_col2.link_button("📦 Track", tracking_url(r.tracking_number), use_container_width=True)
             else:
