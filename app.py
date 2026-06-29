@@ -322,20 +322,26 @@ def _build_courier_stores(
     return results
 
 
-PRINT_SERVER_URL = "https://localhost:8765"
+# Read print server URL from secrets (so it works from any machine).
+# In secrets.toml add: PRINT_SERVER_URL = "https://192.168.1.16:8765"
+# Default falls back to the warehouse PC's fixed IP.
+try:
+    PRINT_SERVER_URL = st.secrets.get("PRINT_SERVER_URL", "https://192.168.1.16:8765")
+except Exception:
+    PRINT_SERVER_URL = "https://192.168.1.16:8765"
 
 
 def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC42d (203 dpi)") -> None:
     """
-    Sends the PDF directly to the label printer via the local print server.
-    The browser fetches http://localhost:8765/print — Chrome allows HTTP
-    requests to localhost from HTTPS pages (mixed-content exception).
-    Falls back to a download button if the print server is unreachable.
+    Sends the PDF directly to the label printer via the warehouse print server.
+    Includes a ping check before sending so the user gets a clear error if the
+    server is unreachable, rather than a generic 'offline' message.
     """
     import base64, hashlib
     b64 = base64.b64encode(pdf_bytes).decode()
     uid = hashlib.md5(key.encode()).hexdigest()[:8]
     printer_js = printer.replace("\\", "\\\\").replace("'", "\\'")
+    server_url = PRINT_SERVER_URL.rstrip("/")
     html = f"""
     <style>
       .ps-btn {{
@@ -351,35 +357,43 @@ def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC
       var btn = document.getElementById('pb_{uid}');
       var msg = document.getElementById('pm_{uid}');
       btn.disabled = true;
-      btn.textContent = '⏳ Sending...';
+      btn.textContent = '⏳ Checking server...';
       msg.textContent = '';
       try {{
+        // Step 1: ping the server first for a clear error message
+        var ping;
+        try {{
+          ping = await fetch('{server_url}/ping', {{method:'GET', signal: AbortSignal.timeout(4000)}});
+        }} catch(pingErr) {{
+          throw new Error('Cannot reach print server at {server_url} — is start_print_server.bat running on the warehouse PC? (' + pingErr.message + ')');
+        }}
+        if(!ping.ok) throw new Error('Print server ping failed (HTTP ' + ping.status + ')');
+
+        // Step 2: send the PDF
+        btn.textContent = '⏳ Sending...';
         var raw = atob('{b64}');
         var arr = new Uint8Array(raw.length);
         for(var i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
         var blob = new Blob([arr], {{type:'application/pdf'}});
-        var resp = await fetch('{PRINT_SERVER_URL}/print?printer={printer_js}', {{
+        var resp = await fetch('{server_url}/print?printer={printer_js}', {{
           method:'POST', body:blob,
-          headers:{{'Content-Type':'application/pdf'}}
+          headers:{{'Content-Type':'application/pdf'}},
+          signal: AbortSignal.timeout(30000)
         }});
         var data = await resp.json();
         if(data.success){{
           btn.textContent = '✅ Printed!';
           msg.style.color='#4caf50';
-          msg.textContent = 'Label sent to printer.';
+          msg.textContent = 'Label sent to {printer_js}.';
           setTimeout(function(){{btn.textContent='🖨 Print Label';btn.disabled=false;msg.textContent='';}},3000);
         }} else {{
-          throw new Error(data.error || 'Unknown error');
+          throw new Error(data.error || 'Unknown printer error');
         }}
       }} catch(e) {{
         btn.textContent = '🖨 Print Label';
         btn.disabled = false;
         msg.style.color='#f44';
-        if(e.message && e.message.includes('fetch')){{
-          msg.textContent = '⚠ Print server offline — run start_print_server.bat on warehouse PC';
-        }} else {{
-          msg.textContent = '❌ ' + e.message;
-        }}
+        msg.textContent = '❌ ' + e.message;
       }}
     }})()">🖨 Print Label</button>
     <div class="ps-msg" id="pm_{uid}"></div>
