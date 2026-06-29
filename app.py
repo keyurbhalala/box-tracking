@@ -65,6 +65,45 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Shosha logo — loaded from logo.png in the repo root ──────────────────────
+import base64 as _b64
+import os as _os
+
+
+@st.cache_resource
+def _load_logo_b64() -> str:
+    """Read logo.png next to app.py and return a base64 string. Cached for performance."""
+    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
+    if _os.path.exists(path):
+        with open(path, "rb") as _f:
+            return _b64.b64encode(_f.read()).decode()
+    return ""
+
+
+def _logo_html(height: int = 48) -> str:
+    """
+    Return an HTML snippet with the Shosha logo.
+    The PNG has a white background, so we wrap it in a white rounded pill
+    so it looks intentional on the dark / teal app backgrounds.
+    Falls back to a styled text badge if logo.png is not yet in the repo.
+    """
+    b64 = _load_logo_b64()
+    if b64:
+        img = (
+            f'<img src="data:image/png;base64,{b64}" '
+            f'height="{height}" style="display:block" alt="Shosha NZ">'
+        )
+        return (
+            f'<div style="display:inline-block;background:#fff;'
+            f'border-radius:12px;padding:6px 14px;line-height:0">{img}</div>'
+        )
+    # Fallback until logo.png is added to the repo
+    return (
+        '<div style="display:inline-block;background:#fff;border-radius:12px;'
+        'padding:6px 14px;font-family:Impact,sans-serif;font-size:22px;'
+        'font-weight:900;color:#cc0000;letter-spacing:2px">SHOSHA</div>'
+    )
 @st.cache_resource
 def _init_db_once():
     init_db()
@@ -108,8 +147,12 @@ st.markdown(
 
 
 def hero(title: str, subtitle: str) -> None:
+    logo = _logo_html(height=52)
     st.markdown(
-        f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
+        f'<div class="hero" style="display:flex;align-items:center;justify-content:space-between">'
+        f'<div><h1>{title}</h1><p>{subtitle}</p></div>'
+        f'<div style="flex-shrink:0;margin-left:16px">{logo}</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -1695,13 +1738,13 @@ def _render_pin_screen() -> None:
     """, unsafe_allow_html=True)
 
     # ── Header ────────────────────────────────────────────────────────────────
-    st.markdown("""
-    <div style='text-align:center;margin-bottom:16px'>
-      <div style='font-size:46px;margin-bottom:6px'>📦</div>
-      <h2 style='margin:0 0 4px;color:#e8e8e8'>Shipment Tracker</h2>
-      <p style='color:#999;font-size:14px;margin:0'>Enter your PIN to continue</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="text-align:center;margin-bottom:20px">'
+        f'<div style="display:flex;justify-content:center">{_logo_html(height=60)}</div>'
+        f'<p style="color:#999;font-size:14px;margin:14px 0 0">Enter your PIN to continue</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     # ── Dot indicators ────────────────────────────────────────────────────────
     n = len(pin_val)
@@ -1774,8 +1817,11 @@ role = st.session_state["pin_role"]
 visible_pages = PAGES if role == "admin" else {k: PAGES[k] for k in GENERAL_PAGES}
 
 with st.sidebar:
-    st.markdown("## 📦 Shipment Tracker")
-    st.caption("Wholesale distribution")
+    st.markdown(
+        f'<div style="display:flex;justify-content:center;margin-bottom:8px">'
+        f'{_logo_html(height=44)}</div>',
+        unsafe_allow_html=True,
+    )
     page = st.radio("Navigation", list(visible_pages), label_visibility="collapsed")
     st.divider()
     if role == "admin":
