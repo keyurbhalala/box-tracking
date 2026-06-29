@@ -1423,17 +1423,72 @@ def render_address_book() -> None:
                     )
 
 
+def render_starshipit_diagnostics() -> None:
+    hero("Starshipit Diagnostics", "Discover valid carrier service codes for label generation")
+
+    st.info(
+        "Use this page to find the correct `carrier_service_code` for the "
+        "`POST /api/orders/shipment` (label) endpoint. "
+        "Enter postcode pair and weight then click **Fetch Rates**."
+    )
+
+    from starshipit import get_available_services
+    col1, col2, col3 = st.columns(3)
+    from_pc = col1.text_input("From postcode", value="1061")
+    to_pc   = col2.text_input("To postcode",   value="0110")
+    weight  = col3.number_input("Weight (kg)",  value=5.0, min_value=0.1, step=0.5)
+
+    if st.button("Fetch Available Services", type="primary"):
+        with st.spinner("Calling Starshipit rates API…"):
+            services = get_available_services(from_pc, to_pc, weight)
+        if services and "error" not in services[0]:
+            import pandas as pd
+            df = pd.DataFrame(services)
+            st.success(f"Found {len(df)} services")
+            st.dataframe(df, use_container_width=True)
+            st.markdown(
+                "**The `service_code` column is what you need for `carrier_service_code` "
+                "in the label endpoint.** Update `SERVICE_OPTIONS` in `starshipit.py` "
+                "with the correct NZ Post code."
+            )
+        else:
+            err = services[0].get("error", "No rates returned") if services else "No response"
+            st.error(f"Rates API failed: {err}")
+
+    st.divider()
+    st.subheader("Test Label for Existing Order")
+    st.caption("Enter a Starshipit order_id and carrier_service_code to test the label endpoint directly.")
+    t_col1, t_col2, t_col3 = st.columns(3)
+    test_order_id = t_col1.text_input("Starshipit order_id")
+    test_carrier  = t_col2.text_input("Carrier", value="NZ Post")
+    test_svc_code = t_col3.text_input("carrier_service_code", value="NZREG")
+
+    if st.button("Test Label Endpoint") and test_order_id:
+        from starshipit import _submit_for_label
+        with st.spinner("Calling POST /api/orders/shipment…"):
+            pdf, err = _submit_for_label(
+                test_order_id, test_carrier, test_svc_code, [], reprint=False
+            )
+        if pdf:
+            st.success(f"✅ Label generated! {len(pdf):,} bytes")
+            st.download_button("Download Test Label", data=pdf, file_name="test_label.pdf", mime="application/pdf")
+        else:
+            st.error(f"❌ {err}")
+            st.caption("Try different carrier/service_code values above until it works, then update starshipit.py.")
+
+
 PAGES = {
     "Dashboard": render_dashboard,
     "New Shipment": render_new_shipment,
     "Delivery Run": render_delivery_run,
-    "History & Edit": render_history,
+    "History & Edit":             render_history,
     "Store Lookup": render_store_lookup,
     "Group Reporting": render_group_reporting,
     "Pallet Search": render_pallet_search,
     "Groups & Stores": render_store_management,
     "Address Book": render_address_book,
     "Audit Trail": render_audit_log,
+    "Starshipit Diagnostics": render_starshipit_diagnostics,
 }
 
 with st.sidebar:
