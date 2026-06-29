@@ -1638,15 +1638,22 @@ def _render_pin_screen() -> None:
     <style>
       [data-testid="stSidebar"], header, footer { display: none !important; }
 
-      /* Constrain and centre the whole page */
-      .main .block-container {
-        max-width: 320px !important;
-        padding-top: 32px !important;
-        margin: 0 auto !important;
+      /* Full page background */
+      .stApp { background: #080f17 !important; }
+
+      /* Card box — centred, max 340px, looks like a proper PIN dialog on desktop */
+      .main .block-container,
+      section[data-testid="stMain"] .block-container {
+        max-width: 340px !important;
+        margin: 48px auto 0 !important;
+        padding: 32px 24px 36px !important;
+        background: #0e1825 !important;
+        border: 1px solid #1e3048 !important;
+        border-radius: 22px !important;
+        box-shadow: 0 12px 48px rgba(0,0,0,0.55) !important;
       }
 
-      /* Force Streamlit columns to always stay as 3 equal columns.
-         Overrides the media-query that stacks them vertically on narrow screens. */
+      /* Force columns to stay as a 3-column grid on all screen sizes */
       div[data-testid="stHorizontalBlock"] {
         display: grid !important;
         grid-template-columns: repeat(3, 1fr) !important;
@@ -1663,19 +1670,19 @@ def _render_pin_screen() -> None:
 
       /* Digit key buttons */
       div[data-testid="stColumn"] div[data-testid="stButton"] > button {
-        height: 72px !important;
-        font-size: 28px !important;
+        height: 68px !important;
+        font-size: 26px !important;
         font-weight: 600 !important;
         border-radius: 14px !important;
-        background: #1e2d3d !important;
-        border: 1.5px solid #2e4057 !important;
+        background: #162030 !important;
+        border: 1.5px solid #243650 !important;
         color: #e8e8e8 !important;
         padding: 0 !important;
         line-height: 1 !important;
         width: 100% !important;
       }
       div[data-testid="stColumn"] div[data-testid="stButton"] > button:hover {
-        background: #26405a !important;
+        background: #1e3050 !important;
         border-color: #3a5a80 !important;
         color: #fff !important;
       }
