@@ -624,19 +624,258 @@ def get_warehouse() -> dict[str, Any]:
 
 
 def get_store_with_address(store_id: int) -> dict[str, Any] | None:
-    """Return a store record including all address fields."""
+    """
+    Return the address_book entry mapped to this store.
+    Returns None when no mapping exists — the caller must refuse the booking
+    and direct the user to Admin → Address Book.
+    """
     with connection() as conn:
         row = conn.execute(
             """
-            SELECT id, store_name, group_name,
-                   contact_name, phone, email,
-                   address_line1, address_line2,
-                   suburb, city, postcode, country
-            FROM stores WHERE id = ?
+            SELECT ab.*
+            FROM store_address_mapping m
+            JOIN address_book ab ON ab.id = m.address_book_id
+            WHERE m.store_id = ?
             """,
             (store_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Address Book
+# ---------------------------------------------------------------------------
+
+
+def import_address_book(records: list[dict]) -> int:
+    """
+    Bulk upsert address book records from an imported CSV/Excel.
+
+    Matches on company_name (case-insensitive).  Existing entries are updated;
+    new entries are inserted.  Returns the total number of records processed.
+    """
+    if not records:
+        return 0
+    with connection() as conn:
+        for r in records:
+            existing = conn.execute(
+                "SELECT id FROM address_book WHERE LOWER(company_name) = LOWER(?)",
+                (r["company_name"],),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE address_book
+                    SET contact_name = ?, phone = ?, email = ?, code = ?,
+                        building = ?, street = ?, suburb = ?, city = ?,
+                        postcode = ?, state = ?, country = ?, country_code = ?,
+                        instructions = ?, carrier = ?, signature_required = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        r.get("contact_name"), r.get("phone"), r.get("email"),
+                        r.get("code"), r.get("building"), r.get("street"),
+                        r.get("suburb"), r.get("city"), r.get("postcode"),
+                        r.get("state"), r.get("country"), r.get("country_code"),
+                        r.get("instructions"), r.get("carrier"),
+                        int(bool(r.get("signature_required", True))),
+                        existing["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO address_book
+                        (company_name, contact_name, phone, email, code,
+                         building, street, suburb, city, postcode, state,
+                         country, country_code, instructions, carrier,
+                         signature_required)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        r["company_name"], r.get("contact_name"), r.get("phone"),
+                        r.get("email"), r.get("code"), r.get("building"),
+                        r.get("street"), r.get("suburb"), r.get("city"),
+                        r.get("postcode"), r.get("state"),
+                        r.get("country", "New Zealand"),
+                        r.get("country_code", "NZ"),
+                        r.get("instructions"), r.get("carrier"),
+                        int(bool(r.get("signature_required", True))),
+                    ),
+                )
+    _clear_address_book_cache()
+    return len(records)
+
+
+@st.cache_data(ttl=60)
+def get_address_book(search: str = "") -> pd.DataFrame:
+    """Return all address book entries, optionally filtered by search term."""
+    if search:
+        return query_df(
+            """
+            SELECT id, company_name, contact_name, phone, email,
+                   building, street, suburb, city, postcode,
+                   country_code, instructions, carrier, signature_required
+            FROM address_book
+            WHERE LOWER(company_name) LIKE LOWER(?)
+               OR LOWER(city)         LIKE LOWER(?)
+               OR LOWER(suburb)       LIKE LOWER(?)
+            ORDER BY LOWER(company_name)
+            """,
+            (f"%{search}%", f"%{search}%", f"%{search}%"),
+        )
+    return query_df(
+        """
+        SELECT id, company_name, contact_name, phone, email,
+               building, street, suburb, city, postcode,
+               country_code, instructions, carrier, signature_required
+        FROM address_book
+        ORDER BY LOWER(company_name)
+        """
+    )
+
+
+def update_address_book_entry(ab_id: int, **fields) -> None:
+    """Update specific columns in an address_book row."""
+    allowed = {
+        "company_name", "contact_name", "phone", "email", "code",
+        "building", "street", "suburb", "city", "postcode", "state",
+        "country", "country_code", "instructions", "carrier",
+        "signature_required",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    with connection() as conn:
+        conn.execute(
+            f"UPDATE address_book SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (*updates.values(), ab_id),
+        )
+    _clear_address_book_cache()
+
+
+def delete_address_book_entry(ab_id: int) -> None:
+    """Delete an address book entry.  Raises if any stores are still mapped to it."""
+    with connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM store_address_mapping WHERE address_book_id = ?",
+            (ab_id,),
+        ).fetchone()["c"]
+        if count:
+            raise ValueError(
+                f"{count} store(s) are mapped to this address. Remove the mapping(s) first."
+            )
+        conn.execute("DELETE FROM address_book WHERE id = ?", (ab_id,))
+    _clear_address_book_cache()
+
+
+def get_store_mappings() -> pd.DataFrame:
+    """All active stores with their mapped Address Book company (NULL columns if unmapped)."""
+    return query_df(
+        """
+        SELECT s.id AS store_id, s.store_name, s.group_name,
+               ab.id AS address_book_id, ab.company_name,
+               ab.city, ab.postcode
+        FROM stores s
+        LEFT JOIN store_address_mapping m ON m.store_id = s.id
+        LEFT JOIN address_book ab         ON ab.id = m.address_book_id
+        WHERE s.active = 1
+        ORDER BY LOWER(s.group_name), LOWER(s.store_name)
+        """
+    )
+
+
+def get_store_mapping(store_id: int) -> dict[str, Any] | None:
+    """Return the address_book row mapped to store_id, or None."""
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT ab.*
+            FROM store_address_mapping m
+            JOIN address_book ab ON ab.id = m.address_book_id
+            WHERE m.store_id = ?
+            """,
+            (store_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_store_mapping(store_id: int, address_book_id: int) -> None:
+    """Create or replace the mapping from a store to an address book entry."""
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO store_address_mapping (store_id, address_book_id)
+            VALUES (?, ?)
+            ON CONFLICT (store_id) DO UPDATE
+                SET address_book_id = EXCLUDED.address_book_id,
+                    mapped_at = CURRENT_TIMESTAMP
+            """,
+            (store_id, address_book_id),
+        )
+        audit(conn, "store_mapping", store_id, "UPSERT",
+              new_values={"address_book_id": address_book_id})
+    _clear_store_cache()
+
+
+def delete_store_mapping(store_id: int) -> None:
+    """Remove the address mapping for a store."""
+    with connection() as conn:
+        conn.execute(
+            "DELETE FROM store_address_mapping WHERE store_id = ?", (store_id,)
+        )
+        audit(conn, "store_mapping", store_id, "DELETE")
+    _clear_store_cache()
+
+
+def get_unmapped_stores() -> pd.DataFrame:
+    """Return active stores that have no address book mapping."""
+    return query_df(
+        """
+        SELECT s.id, s.store_name, s.group_name
+        FROM stores s
+        LEFT JOIN store_address_mapping m ON m.store_id = s.id
+        WHERE s.active = 1 AND m.id IS NULL
+        ORDER BY LOWER(s.group_name), LOWER(s.store_name)
+        """
+    )
+
+
+def auto_suggest_mappings() -> list[dict]:
+    """
+    Suggest mappings for unmapped stores where 'Shosha ' + store_name
+    matches an address_book company_name (case-insensitive).
+
+    Returns a list of dicts: {store_id, store_name, ab_id, company_name}.
+    """
+    unmapped = get_unmapped_stores()
+    if unmapped.empty:
+        return []
+    ab = get_address_book()
+    if ab.empty:
+        return []
+    company_lower: dict[str, dict] = {
+        row["company_name"].lower(): dict(row)
+        for _, row in ab.iterrows()
+    }
+    suggestions = []
+    for _, s in unmapped.iterrows():
+        candidate = f"shosha {s['store_name'].lower()}"
+        if candidate in company_lower:
+            ab_row = company_lower[candidate]
+            suggestions.append({
+                "store_id":    int(s["id"]),
+                "store_name":  s["store_name"],
+                "ab_id":       int(ab_row["id"]),
+                "company_name": ab_row["company_name"],
+            })
+    return suggestions
+
+
+def _clear_address_book_cache() -> None:
+    get_address_book.clear()
 
 
 def save_courier_booking(
@@ -715,8 +954,12 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
     store    = get_store_with_address(booking["store_id"])
     warehouse = get_warehouse()
 
-    if not store or not store.get("address_line1"):
-        return False, f"No address configured for store '{booking['store_name']}'."
+    if not store or not store.get("street"):
+        return (
+            False,
+            f"No address book mapping for store '{booking['store_name']}'. "
+            "Go to Admin → Address Book to map this store.",
+        )
     if not warehouse:
         return False, "Warehouse settings not found in database."
 
@@ -731,15 +974,15 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
         email=warehouse.get("email", ""),
     )
     recipient = Address(
-        name=store.get("contact_name") or store["store_name"],
+        name=store.get("company_name") or booking["store_name"],
         phone=store.get("phone") or "",
-        street=store.get("address_line1") or "",
+        street=store.get("street") or "",
         suburb=store.get("suburb") or "",
         city=store.get("city") or "",
         postcode=store.get("postcode") or "",
-        country=store.get("country", "NZ"),
+        country=store.get("country_code") or "NZ",
         email=store.get("email") or "",
-        building=store.get("address_line2") or "",
+        building=store.get("building") or "",
     )
     pkg = Package(
         boxes=booking["boxes"],

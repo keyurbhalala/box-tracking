@@ -218,6 +218,48 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_courier_shipment ON courier_bookings(shipment_id)",
     "CREATE INDEX IF NOT EXISTS idx_courier_store    ON courier_bookings(store_id)",
+
+    # ── Address Book — single source of truth for all delivery addresses ──────
+    """
+    CREATE TABLE IF NOT EXISTS address_book (
+        id                  SERIAL PRIMARY KEY,
+        company_name        TEXT NOT NULL,
+        contact_name        TEXT,
+        phone               TEXT,
+        email               TEXT,
+        code                TEXT,
+        building            TEXT,
+        street              TEXT,
+        suburb              TEXT,
+        city                TEXT,
+        postcode            TEXT,
+        state               TEXT,
+        country             TEXT DEFAULT 'New Zealand',
+        country_code        TEXT DEFAULT 'NZ',
+        instructions        TEXT,
+        carrier             TEXT,
+        signature_required  INTEGER DEFAULT 1,
+        imported_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ab_company ON address_book(LOWER(company_name))",
+
+    # ── Store → Address Book mapping ──────────────────────────────────────────
+    # Each store maps to exactly one Address Book company.
+    # Courier bookings look up the delivery address via this table — never
+    # store duplicate address data in shipment records.
+    """
+    CREATE TABLE IF NOT EXISTS store_address_mapping (
+        id              SERIAL PRIMARY KEY,
+        store_id        INTEGER NOT NULL UNIQUE,
+        address_book_id INTEGER NOT NULL,
+        mapped_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (store_id)        REFERENCES stores(id)       ON DELETE CASCADE,
+        FOREIGN KEY (address_book_id) REFERENCES address_book(id) ON DELETE RESTRICT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sam_store ON store_address_mapping(store_id)",
 ]
 
 DEFAULT_GROUPS = {

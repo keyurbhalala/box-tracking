@@ -20,25 +20,35 @@ from services import (
     add_group,
     add_store,
     audit_history,
+    auto_suggest_mappings,
     create_shipment,
     dashboard_metrics,
+    delete_address_book_entry,
     delete_group,
     delete_shipment,
     delete_store,
+    delete_store_mapping,
+    get_address_book,
     get_courier_bookings,
     get_delivery_details,
     get_delivery_runs,
     get_groups,
     get_shipment,
     get_stores,
+    get_store_mappings,
+    get_store_mapping,
     get_store_with_address,
+    get_unmapped_stores,
     get_warehouse,
     history,
+    import_address_book,
     pallet_lookup,
     retry_courier_booking,
     save_courier_booking,
     save_signature,
+    set_store_mapping,
     trend_data,
+    update_address_book_entry,
     update_group,
     update_shipment,
     update_store,
@@ -118,13 +128,27 @@ def downloads(df: pd.DataFrame, stem: str, summary: dict | None = None) -> None:
     )
 
 
-def shipment_editor_rows(stores: pd.DataFrame, existing: pd.DataFrame | None = None):
+def shipment_editor_rows(
+    stores: pd.DataFrame,
+    existing: pd.DataFrame | None = None,
+    default_dims: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Build the data editor DataFrame.
+    When default_dims is supplied (Courier mode), four editable dimension columns
+    are added, pre-filled with the defaults.  Users can override per-store.
+    """
     rows = stores[["id", "store_name", "group_name"]].copy()
     rows.columns = ["Store ID", "Store", "Group"]
     rows["Boxes"] = 0
     if existing is not None and not existing.empty:
         box_map = existing.set_index("store_id")["boxes"].to_dict()
         rows["Boxes"] = rows["Store ID"].map(box_map).fillna(0).astype(int)
+    if default_dims:
+        rows["Wt/box (kg)"] = float(default_dims.get("weight", 1.0))
+        rows["L (cm)"]       = int(default_dims.get("length", 30))
+        rows["W (cm)"]       = int(default_dims.get("width", 20))
+        rows["H (cm)"]       = int(default_dims.get("height", 15))
     return rows
 
 
@@ -200,18 +224,20 @@ def render_dashboard() -> None:
 def _build_courier_stores(
     shipment_id: int,
     details: list[dict],
-    pkg_info: dict,
+    service_code: str,
 ) -> list:
     """
     Book a Starshipit consignment for each store and save results.
+
+    Each dict in `details` must carry its own weight/length/width/height so
+    different stores can have different package sizes in the same shipment.
     Returns a list of BookingResult objects.
     """
     from starshipit import create_order, Address, Package, BookingResult
 
     warehouse = get_warehouse()
     if not warehouse or not warehouse.get("address_line1"):
-        error_msg = "Warehouse address not configured. Please set it up in the database."
-        st.error(error_msg)
+        st.error("Warehouse address not configured. Please set it up in the database.")
         return []
 
     sender = Address(
@@ -229,43 +255,44 @@ def _build_courier_stores(
     progress = st.progress(0, text="Booking couriers with Starshipit…")
 
     for i, d in enumerate(details):
+        # Per-store package dimensions (set by user in the editor)
+        w  = float(d.get("weight", 1.0) or 1.0)
+        ln = float(d.get("length", 30.0) or 30.0)
+        wd = float(d.get("width",  20.0) or 20.0)
+        ht = float(d.get("height", 15.0) or 15.0)
+
         store = get_store_with_address(d["store_id"])
 
-        if not store or not store.get("address_line1"):
-            from starshipit import BookingResult
+        if not store or not store.get("street"):
             r = BookingResult(
                 success=False,
                 store_name=d["store_name"],
                 boxes=d["boxes"],
                 booking_status="Failed",
-                error="No delivery address on file for this store.",
+                error=(
+                    "No address book mapping. "
+                    "Go to Admin → Address Book to map this store."
+                ),
             )
         else:
             recipient = Address(
-                name=store.get("contact_name") or store["store_name"],
+                name=store.get("company_name") or d["store_name"],
                 phone=store.get("phone") or "",
-                street=store.get("address_line1") or "",
+                street=store.get("street") or "",
                 suburb=store.get("suburb") or "",
                 city=store.get("city") or "",
                 postcode=store.get("postcode") or "",
-                country=store.get("country", "NZ"),
+                country=store.get("country_code") or "NZ",
                 email=store.get("email") or "",
-                building=store.get("address_line2") or "",
+                building=store.get("building") or "",
             )
-            pkg = Package(
-                boxes=d["boxes"],
-                weight_per_box=pkg_info["weight"],
-                length=pkg_info["length"],
-                width=pkg_info["width"],
-                height=pkg_info["height"],
-            )
+            pkg = Package(boxes=d["boxes"], weight_per_box=w, length=ln, width=wd, height=ht)
             ref = f"SHP-{shipment_id}-{d['store_id']}"
-            r = create_order(sender, recipient, pkg, ref, pkg_info["service_code"])
+            r   = create_order(sender, recipient, pkg, ref, service_code)
 
         save_courier_booking(
             shipment_id, d["store_id"], d["store_name"], d["boxes"],
-            pkg_info["weight"], pkg_info["length"], pkg_info["width"], pkg_info["height"],
-            pkg_info["service_code"], r,
+            w, ln, wd, ht, service_code, r,
         )
         results.append(r)
         progress.progress((i + 1) / len(details), text=f"Booked {d['store_name']}…")
@@ -335,7 +362,7 @@ def render_new_shipment() -> None:
         group_map = dict(zip(groups["group_name"], groups["id"]))
         selected_group = st.selectbox("Group / Store", list(group_map))
         stores = get_stores(int(group_map[selected_group]))
-        editor_key = f"new_editor_{group_map[selected_group]}"
+        _base_key = f"new_editor_{group_map[selected_group]}"
 
     else:  # Custom Group
         all_stores = get_stores()
@@ -352,7 +379,7 @@ def render_new_shipment() -> None:
             st.info("Select at least one store to continue.")
             return
         stores = all_stores[all_stores["store_name"].isin(selected_store_names)].copy()
-        editor_key = f"new_editor_custom_{'_'.join(sorted(selected_store_names))}"
+        _base_key = f"new_editor_custom_{'_'.join(sorted(selected_store_names))}"
 
     # ── Shipment Method (outside form so Courier fields appear immediately) ──
     method = st.selectbox(
@@ -362,42 +389,74 @@ def render_new_shipment() -> None:
         key="new_shipment_method",
     )
 
-    # ── Courier package details (only when Courier selected) ─────────────────
+    # ── Courier defaults + service (outside form, Courier only) ──────────────
     from starshipit import SERVICE_OPTIONS, DEFAULT_SERVICE_CODE
-    pkg_info: dict = {}
+    pkg_defaults: dict = {}
+    service_code = DEFAULT_SERVICE_CODE
     if method == "Courier":
         with st.container(border=True):
-            st.markdown("**Package Details** — applied to each store's consignment")
+            st.markdown(
+                "**Default package size** — pre-fills every row below.  "
+                "Override individual rows in the table for stores with different boxes."
+            )
             pc1, pc2, pc3, pc4 = st.columns(4)
-            pkg_info["weight"] = pc1.number_input(
+            pkg_defaults["weight"] = pc1.number_input(
                 "Weight / box (kg)", min_value=0.1, max_value=50.0,
                 value=1.0, step=0.1, key="pkg_weight",
             )
-            pkg_info["length"] = pc2.number_input(
+            pkg_defaults["length"] = pc2.number_input(
                 "Length (cm)", min_value=1, max_value=300,
                 value=30, step=1, key="pkg_length",
             )
-            pkg_info["width"] = pc3.number_input(
+            pkg_defaults["width"] = pc3.number_input(
                 "Width (cm)", min_value=1, max_value=300,
                 value=20, step=1, key="pkg_width",
             )
-            pkg_info["height"] = pc4.number_input(
+            pkg_defaults["height"] = pc4.number_input(
                 "Height (cm)", min_value=1, max_value=300,
                 value=15, step=1, key="pkg_height",
             )
             svc_label = st.selectbox(
                 "NZ Post Service", list(SERVICE_OPTIONS.keys()), key="pkg_service",
             )
-            pkg_info["service_code"] = SERVICE_OPTIONS[svc_label]
+            service_code = SERVICE_OPTIONS[svc_label]
+            st.caption(
+                "💡 To apply different box sizes per store, edit the "
+                "Wt/box, L, W, H columns directly in the table below."
+            )
+
+    # ── Editor key changes when method changes → forces fresh pre-fill ────────
+    editor_key = f"{_base_key}_{method}"
 
     # ── Shipment form ─────────────────────────────────────────────────────────
+    # Dimension columns (Wt/box, L, W, H) appear only in Courier mode.
+    dim_col_config: dict = {}
+    if method == "Courier":
+        dim_col_config = {
+            "Wt/box (kg)": st.column_config.NumberColumn(
+                "Wt/box (kg)", min_value=0.1, max_value=50.0, step=0.1, format="%.1f",
+            ),
+            "L (cm)": st.column_config.NumberColumn(
+                "L (cm)", min_value=1, max_value=300, step=1, format="%d",
+            ),
+            "W (cm)": st.column_config.NumberColumn(
+                "W (cm)", min_value=1, max_value=300, step=1, format="%d",
+            ),
+            "H (cm)": st.column_config.NumberColumn(
+                "H (cm)", min_value=1, max_value=300, step=1, format="%d",
+            ),
+        }
+
     with st.form("new_shipment", clear_on_submit=False):
         shipment_date = st.date_input("Shipment Date", value=_today_nz())
         notes = st.text_area("Notes", placeholder="Optional reference or instructions")
         if stores.empty:
             st.warning("This group has no active stores.")
         editor = st.data_editor(
-            shipment_editor_rows(stores),
+            shipment_editor_rows(
+                stores,
+                default_dims=pkg_defaults if method == "Courier" else None,
+            ),
             hide_index=True,
             use_container_width=True,
             disabled=["Store ID", "Store", "Group"],
@@ -406,6 +465,7 @@ def render_new_shipment() -> None:
                 "Boxes": st.column_config.NumberColumn(
                     "Boxes", min_value=0, step=1, format="%d"
                 ),
+                **dim_col_config,
             },
             key=editor_key,
         )
@@ -419,25 +479,37 @@ def render_new_shipment() -> None:
         if not method:
             st.error("Please select a Shipment Method before saving.")
             return
+
+        # Build per-store details — include per-row dimensions when Courier
+        is_courier = (method == "Courier")
         details = [
             {
-                "store_id": int(row["Store ID"]),
+                "store_id":   int(row["Store ID"]),
                 "store_name": row["Store"],
                 "group_name": row["Group"],
-                "boxes": int(row["Boxes"] or 0),
+                "boxes":      int(row["Boxes"] or 0),
+                **(
+                    {
+                        "weight": float(row.get("Wt/box (kg)") or 1.0),
+                        "length": float(row.get("L (cm)") or 30),
+                        "width":  float(row.get("W (cm)") or 20),
+                        "height": float(row.get("H (cm)") or 15),
+                    }
+                    if is_courier else {}
+                ),
             }
             for _, row in editor.iterrows()
         ]
+
         try:
             shipment_id, pallet_id = create_shipment(shipment_date, method, notes, details)
         except Exception as exc:
             st.error(str(exc))
             return
 
-        if method == "Courier":
-            # Book a Starshipit consignment for every store that has boxes
+        if is_courier:
             stores_to_book = [d for d in details if d["boxes"] > 0]
-            results = _build_courier_stores(shipment_id, stores_to_book, pkg_info)
+            results = _build_courier_stores(shipment_id, stores_to_book, service_code)
             if results:
                 st.session_state["_courier_results"] = {
                     "shipment_id": shipment_id,
@@ -448,7 +520,6 @@ def render_new_shipment() -> None:
             if pallet_id:
                 message += f"  Pallet ID: {pallet_id}"
             st.success(message)
-            # Clear any leftover courier result panel from a previous booking
             st.session_state.pop("_courier_results", None)
 
     # ── Courier booking results panel ─────────────────────────────────────────
@@ -980,6 +1051,261 @@ def render_delivery_run() -> None:
                         st.warning("Please capture a signature before saving.")
 
 
+def render_address_book() -> None:
+    """Admin screen for the Address Book and Store → Company mapping."""
+    st.title("🗂 Address Book")
+    st.caption(
+        "Single source of truth for all delivery addresses. "
+        "Import from Starshipit, map each store to a company, then courier bookings "
+        "pull the address automatically."
+    )
+
+    tab_import, tab_companies, tab_mapping, tab_unmapped = st.tabs(
+        ["📥 Import", "🏢 Companies", "🔗 Store Mapping", "⚠️ Unmapped Stores"]
+    )
+
+    # ── Import ────────────────────────────────────────────────────────────────
+    with tab_import:
+        st.markdown("### Import Address Book")
+        st.markdown(
+            "Export your Address Book from Starshipit (Settings → Address Book → Export) "
+            "then upload the file here. Existing companies are updated; new ones are added."
+        )
+        st.caption(
+            "Expected columns: **Company**, Name, Email, Telephone, Building, Street, "
+            "Suburb, City, PostCode, Country, CountryCode, Instructions, Carrier, SignatureRequired"
+        )
+        uploaded = st.file_uploader(
+            "Choose CSV or Excel file",
+            type=["csv", "xlsx", "xls"],
+            key="ab_upload",
+        )
+        if uploaded:
+            if uploaded.name.lower().endswith(".csv"):
+                df_raw = pd.read_csv(uploaded)
+            else:
+                df_raw = pd.read_excel(uploaded)
+            df_raw.columns = [c.strip() for c in df_raw.columns]
+
+            st.markdown(f"**Preview** — {len(df_raw)} rows found")
+            st.dataframe(df_raw.head(10), use_container_width=True, hide_index=True)
+
+            if st.button("Import into Address Book", type="primary", key="do_import"):
+                records = []
+                for _, row in df_raw.iterrows():
+                    company = str(row.get("Company") or "").strip()
+                    if not company:
+                        continue
+
+                    def _s(col: str, default: str = "") -> str | None:
+                        v = str(row.get(col) or "").strip()
+                        return v if v and v.lower() not in ("nan", "none") else (default or None)
+
+                    records.append({
+                        "company_name":       company,
+                        "contact_name":       _s("Name"),
+                        "phone":              _s("Telephone"),
+                        "email":              _s("Email"),
+                        "code":               _s("Code"),
+                        "building":           _s("Building"),
+                        "street":             _s("Street"),
+                        "suburb":             _s("Suburb"),
+                        "city":               _s("City"),
+                        "postcode":           _s("PostCode"),
+                        "state":              _s("State"),
+                        "country":            _s("Country", "New Zealand"),
+                        "country_code":       _s("CountryCode", "NZ"),
+                        "instructions":       _s("Instructions"),
+                        "carrier":            _s("Carrier"),
+                        "signature_required": bool(row.get("SignatureRequired", True)),
+                    })
+                with st.spinner("Importing…"):
+                    count = import_address_book(records)
+                st.success(f"✅ Imported {count} companies. Existing entries were updated in-place.")
+                st.rerun()
+
+    # ── Companies ─────────────────────────────────────────────────────────────
+    with tab_companies:
+        st.markdown("### All Companies")
+        search = st.text_input(
+            "Search", placeholder="Company name, city or suburb…", key="ab_search"
+        )
+        ab_df = get_address_book(search.strip())
+
+        if ab_df.empty:
+            msg = "No address book entries yet — import one above." if not search else "No matches."
+            st.info(msg)
+        else:
+            st.dataframe(
+                ab_df.drop(columns=["id"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.markdown(f"*{len(ab_df)} entries*")
+            st.divider()
+            st.markdown("### Edit an entry")
+
+            ab_options = {row["company_name"]: row["id"] for _, row in ab_df.iterrows()}
+            selected_company = st.selectbox(
+                "Select company to edit", list(ab_options.keys()), key="ab_edit_sel"
+            )
+            ab_id = ab_options[selected_company]
+            ab_row = ab_df[ab_df["id"] == ab_id].iloc[0]
+
+            with st.form(f"edit_ab_{ab_id}"):
+                c1, c2 = st.columns(2)
+                new_company  = c1.text_input("Company Name *", value=ab_row["company_name"])
+                new_contact  = c2.text_input("Contact Name", value=ab_row.get("contact_name") or "")
+                c3, c4 = st.columns(2)
+                new_phone    = c3.text_input("Phone", value=ab_row.get("phone") or "")
+                new_email    = c4.text_input("Email", value=ab_row.get("email") or "")
+                new_building = st.text_input("Building / Unit", value=ab_row.get("building") or "")
+                new_street   = st.text_input("Street *", value=ab_row.get("street") or "")
+                c5, c6, c7  = st.columns(3)
+                new_suburb   = c5.text_input("Suburb", value=ab_row.get("suburb") or "")
+                new_city     = c6.text_input("City *", value=ab_row.get("city") or "")
+                new_postcode = c7.text_input("Postcode *", value=ab_row.get("postcode") or "")
+                new_instruct = st.text_area(
+                    "Delivery Instructions", value=ab_row.get("instructions") or ""
+                )
+                save_ab = st.form_submit_button("💾 Save Changes", type="primary")
+
+            if save_ab:
+                if not new_company.strip() or not new_street.strip():
+                    st.error("Company Name and Street are required.")
+                else:
+                    update_address_book_entry(
+                        ab_id,
+                        company_name=new_company.strip(),
+                        contact_name=new_contact.strip() or None,
+                        phone=new_phone.strip() or None,
+                        email=new_email.strip() or None,
+                        building=new_building.strip() or None,
+                        street=new_street.strip(),
+                        suburb=new_suburb.strip() or None,
+                        city=new_city.strip(),
+                        postcode=new_postcode.strip(),
+                        instructions=new_instruct.strip() or None,
+                    )
+                    st.success("Saved.")
+                    st.rerun()
+
+            with st.expander("🗑 Delete this entry"):
+                st.warning(
+                    "This permanently removes the company from the Address Book. "
+                    "You must unmap any stores that point to it first."
+                )
+                if st.button("Delete permanently", key=f"del_ab_{ab_id}"):
+                    try:
+                        delete_address_book_entry(ab_id)
+                        st.success("Deleted.")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
+    # ── Store Mapping ─────────────────────────────────────────────────────────
+    with tab_mapping:
+        st.markdown("### Store → Company Mapping")
+        st.caption(
+            "Each store must be mapped to exactly one Address Book company before "
+            "courier bookings can be created."
+        )
+        ab_all = get_address_book()
+        if ab_all.empty:
+            st.warning("Import an Address Book first (Import tab above).")
+        else:
+            # Auto-suggest banner
+            suggestions = auto_suggest_mappings()
+            if suggestions:
+                st.info(
+                    f"🔍 **{len(suggestions)} auto-suggestion(s) available** — "
+                    "found 'Shosha + Store Name' matches in the Address Book."
+                )
+                col_a, col_b = st.columns([1, 2])
+                if col_a.button("✅ Apply All Suggestions", type="primary", key="apply_all_sug"):
+                    for s in suggestions:
+                        set_store_mapping(s["store_id"], s["ab_id"])
+                    st.success(f"Applied {len(suggestions)} mapping(s).")
+                    st.rerun()
+
+            # Build dropdown options
+            ab_opt_names = ["— Unmapped —"] + list(ab_all["company_name"])
+            ab_opt_ids   = {row["company_name"]: int(row["id"]) for _, row in ab_all.iterrows()}
+
+            mappings = get_store_mappings()
+            st.divider()
+
+            current_group = None
+            for _, s in mappings.iterrows():
+                grp = s["group_name"]
+                if grp != current_group:
+                    st.markdown(f"**{grp}**")
+                    current_group = grp
+
+                current_name = s.get("company_name") or "— Unmapped —"
+                try:
+                    sel_idx = ab_opt_names.index(current_name)
+                except ValueError:
+                    sel_idx = 0
+
+                col1, col2, col3 = st.columns([3, 5, 1])
+                col1.markdown(s["store_name"])
+                new_sel = col2.selectbox(
+                    "Company",
+                    ab_opt_names,
+                    index=sel_idx,
+                    key=f"map_{s['store_id']}",
+                    label_visibility="collapsed",
+                )
+                if col3.button("Save", key=f"save_map_{s['store_id']}"):
+                    if new_sel == "— Unmapped —":
+                        delete_store_mapping(int(s["store_id"]))
+                        st.success(f"Unmapped **{s['store_name']}**.")
+                    else:
+                        set_store_mapping(int(s["store_id"]), ab_opt_ids[new_sel])
+                        st.success(f"Mapped **{s['store_name']}** → {new_sel}")
+                    st.rerun()
+
+    # ── Unmapped Stores ───────────────────────────────────────────────────────
+    with tab_unmapped:
+        st.markdown("### Unmapped Stores")
+        unmapped = get_unmapped_stores()
+        if unmapped.empty:
+            st.success("✅ All active stores have Address Book mappings — courier bookings will work!")
+        else:
+            st.warning(
+                f"**{len(unmapped)} store(s)** have no mapping and cannot receive courier bookings."
+            )
+            st.dataframe(
+                unmapped[["store_name", "group_name"]].rename(
+                    columns={"store_name": "Store", "group_name": "Group"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            ab_all2 = get_address_book()
+            if ab_all2.empty:
+                st.info("Import an Address Book first to enable mapping.")
+            else:
+                suggestions2 = auto_suggest_mappings()
+                if suggestions2:
+                    st.markdown("#### Auto-suggestions (Shosha + Store Name matches)")
+                    for s in suggestions2:
+                        c1, c2, c3 = st.columns([3, 4, 1])
+                        c1.markdown(f"**{s['store_name']}**")
+                        c2.markdown(f"→ {s['company_name']}")
+                        if c3.button("Apply", key=f"quick_map_{s['store_id']}"):
+                            set_store_mapping(s["store_id"], s["ab_id"])
+                            st.success(f"Mapped {s['store_name']}")
+                            st.rerun()
+                else:
+                    st.info(
+                        "No automatic suggestions found. "
+                        "Go to the Store Mapping tab and assign companies manually."
+                    )
+
+
 PAGES = {
     "Dashboard": render_dashboard,
     "New Shipment": render_new_shipment,
@@ -989,6 +1315,7 @@ PAGES = {
     "Group Reporting": render_group_reporting,
     "Pallet Search": render_pallet_search,
     "Groups & Stores": render_store_management,
+    "Address Book": render_address_book,
     "Audit Trail": render_audit_log,
 }
 
