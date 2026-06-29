@@ -1621,139 +1621,99 @@ def _get_pins() -> tuple[str, str]:
 
 
 def _render_pin_screen() -> None:
-    """Full-page touch-friendly 4-digit PIN pad. Sets st.session_state.pin_role on success."""
+    """
+    Touch-friendly 4-digit PIN pad built with native Streamlit buttons.
+    Sets st.session_state['pin_role'] to 'admin' or 'general' on success.
+    """
+    admin_pin, general_pin = _get_pins()
+
+    # Init digit buffer
+    if "_pin_digits" not in st.session_state:
+        st.session_state["_pin_digits"] = []
+    if "_pin_error" not in st.session_state:
+        st.session_state["_pin_error"] = ""
+
+    # ── CSS ──────────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
-      /* Hide Streamlit chrome while on PIN screen */
-      [data-testid="stSidebar"], header, footer { display: none !important; }
-      .pin-wrap {
-        display: flex; flex-direction: column; align-items: center;
-        justify-content: center; min-height: 80vh; gap: 0;
+      [data-testid="stSidebar"], header { display: none !important; }
+      /* Make all buttons on this page look like PIN keys */
+      div[data-testid="stVerticalBlock"] button {
+        height: 72px !important;
+        font-size: 26px !important;
+        font-weight: 600 !important;
+        border-radius: 14px !important;
+        border: 1.5px solid #2e4057 !important;
+        background: #1e2d3d !important;
+        color: #e8e8e8 !important;
+        width: 100% !important;
       }
-      .pin-title  { font-size: 28px; font-weight: 700; color: #e8e8e8; margin-bottom: 6px; }
-      .pin-sub    { font-size: 15px; color: #aaa; margin-bottom: 28px; }
-      .pin-dots   {
-        display: flex; gap: 16px; margin-bottom: 32px;
+      div[data-testid="stVerticalBlock"] button:active {
+        background: #1a7f5a !important;
       }
-      .pin-dot {
-        width: 18px; height: 18px; border-radius: 50%;
-        background: #444; border: 2px solid #666; transition: background .15s;
-      }
-      .pin-dot.filled { background: #1a7f5a; border-color: #1a7f5a; }
-      .pin-grid {
-        display: grid; grid-template-columns: repeat(3, 80px);
-        gap: 12px; margin-bottom: 16px;
-      }
-      .pin-key {
-        width: 80px; height: 80px; border-radius: 14px;
-        background: #1e2d3d; border: 1.5px solid #2e4057;
-        color: #e8e8e8; font-size: 28px; font-weight: 600;
-        cursor: pointer; display: flex; align-items: center;
-        justify-content: center; user-select: none;
-        -webkit-tap-highlight-color: transparent;
-        transition: background .1s, transform .1s;
-        box-shadow: 0 2px 6px #0004;
-      }
-      .pin-key:active { background: #1a7f5a; transform: scale(.93); }
-      .pin-key.del    { background: #2c1a1a; border-color: #4a2020; font-size: 22px; }
-      .pin-key.del:active { background: #7f1a1a; }
-      .pin-error { color: #f55; font-size: 14px; margin-top: 8px; min-height: 20px; text-align:center; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Component handles PIN entry entirely in JS; posts back via query param trick
-    uid = "pinpad"
-    admin_pin, general_pin = _get_pins()
+    # ── Centre the pad ────────────────────────────────────────────────────────
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("### 📦 Shipment Tracker")
+        st.caption("Enter your PIN to continue")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    # We use a hidden Streamlit text_input as the bridge: JS fills it, Streamlit reads it.
-    # The component renders the visual pad; a hidden real input carries the value.
-    entered = st.session_state.get("_pin_entered", "")
+        # Dot display
+        digits = st.session_state["_pin_digits"]
+        dots = "  ".join("🟢" if i < len(digits) else "⚫" for i in range(4))
+        st.markdown(f"<h2 style='text-align:center;letter-spacing:8px'>{dots}</h2>",
+                    unsafe_allow_html=True)
 
-    html = f"""
-    <div class="pin-wrap">
-      <div class="pin-title">📦 Shipment Tracker</div>
-      <div class="pin-sub">Enter your PIN to continue</div>
-      <div class="pin-dots" id="dots_{uid}">
-        <div class="pin-dot" id="d0"></div>
-        <div class="pin-dot" id="d1"></div>
-        <div class="pin-dot" id="d2"></div>
-        <div class="pin-dot" id="d3"></div>
-      </div>
-      <div class="pin-grid">
-        {''.join(f'<div class="pin-key" onclick="pk(\\'{d}\\')">{d}</div>' for d in ['1','2','3','4','5','6','7','8','9'])}
-        <div class="pin-key" onclick="pk('0')">0</div>
-        <div class="pin-key del" onclick="pdel()">⌫</div>
-      </div>
-      <div class="pin-error" id="perr_{uid}"></div>
-    </div>
+        if st.session_state["_pin_error"]:
+            st.error(st.session_state["_pin_error"])
+        else:
+            st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
 
-    <script>
-    var _pin = '';
-    var ADMIN   = '{admin_pin}';
-    var GENERAL = '{general_pin}';
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    function pk(d) {{
-      if(_pin.length >= 4) return;
-      _pin += d;
-      _updateDots();
-      if(_pin.length === 4) _check();
-    }}
-    function pdel() {{
-      _pin = _pin.slice(0, -1);
-      _updateDots();
-      document.getElementById('perr_{uid}').textContent = '';
-    }}
-    function _updateDots() {{
-      for(var i=0;i<4;i++) {{
-        var el = document.getElementById('d'+i);
-        if(el) el.className = 'pin-dot' + (i < _pin.length ? ' filled' : '');
-      }}
-    }}
-    function _check() {{
-      if(_pin === ADMIN || _pin === GENERAL) {{
-        // Write to the hidden Streamlit input and trigger rerun
-        var role = (_pin === ADMIN) ? 'admin' : 'general';
-        // Find the hidden input Streamlit rendered and set its value
-        var inputs = window.parent.document.querySelectorAll('input[type=text]');
-        for(var i=0; i<inputs.length; i++) {{
-          if(inputs[i].dataset.pinbridge === 'true') {{
-            var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeInputValueSetter.call(inputs[i], role);
-            inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
-            break;
-          }}
-        }}
-      }} else {{
-        document.getElementById('perr_{uid}').textContent = '✗ Incorrect PIN — try again';
-        _pin = '';
-        setTimeout(function(){{_updateDots();}}, 50);
-      }}
-    }}
-    </script>
-    """
-    st.components.v1.html(html, height=520, scrolling=False)
+        # ── Digit grid (3 columns) ────────────────────────────────────────────
+        def _press(d: str) -> None:
+            if len(st.session_state["_pin_digits"]) < 4:
+                st.session_state["_pin_digits"].append(d)
+                st.session_state["_pin_error"] = ""
 
-    # Hidden bridge input — JS writes role ('admin'|'general') into it
-    # We mark it with a data attribute so JS can find it
-    st.markdown("""
-    <script>
-    // Tag the Streamlit input so JS in the component can target it
-    (function tag() {
-      var inputs = document.querySelectorAll('input[type=text]');
-      inputs.forEach(function(el) {
-        if (el.closest('[data-testid="stTextInput"]')) el.setAttribute('data-pinbridge','true');
-      });
-      if (!inputs.length) setTimeout(tag, 200);
-    })();
-    </script>
-    """, unsafe_allow_html=True)
+        for row in [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"]]:
+            c1, c2, c3 = st.columns(3)
+            for col, digit in zip([c1, c2, c3], row):
+                if col.button(digit, key=f"pk_{digit}", use_container_width=True):
+                    _press(digit)
 
-    bridge = st.text_input("pin_bridge", value="", key="_pin_bridge",
-                           label_visibility="collapsed")
-    if bridge in ("admin", "general"):
-        st.session_state["pin_role"] = bridge
-        st.session_state["_pin_bridge"] = ""
-        st.rerun()
+        # Bottom row: blank | 0 | ⌫
+        b1, b2, b3 = st.columns(3)
+        b1.markdown("")           # empty slot
+        if b2.button("0", key="pk_0", use_container_width=True):
+            _press("0")
+        if b3.button("⌫", key="pk_del", use_container_width=True):
+            if st.session_state["_pin_digits"]:
+                st.session_state["_pin_digits"].pop()
+            st.session_state["_pin_error"] = ""
+
+        # ── Check PIN once 4 digits entered ───────────────────────────────────
+        if len(st.session_state["_pin_digits"]) == 4:
+            entered = "".join(st.session_state["_pin_digits"])
+            if entered == admin_pin:
+                st.session_state["pin_role"] = "admin"
+                st.session_state["_pin_digits"] = []
+                st.session_state["_pin_error"] = ""
+                st.rerun()
+            elif entered == general_pin:
+                st.session_state["pin_role"] = "general"
+                st.session_state["_pin_digits"] = []
+                st.session_state["_pin_error"] = ""
+                st.rerun()
+            else:
+                st.session_state["_pin_error"] = "✗ Incorrect PIN — try again"
+                st.session_state["_pin_digits"] = []
+                st.rerun()
 
 
 # ── Main app (post-login) ─────────────────────────────────────────────────────
