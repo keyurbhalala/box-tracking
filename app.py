@@ -147,21 +147,22 @@ st.markdown(
 
 
 def hero(title: str, subtitle: str) -> None:
-    b64 = _load_logo_b64()
-    logo_badge = (
-        f'<div style="flex-shrink:0;margin-left:20px;'
-        f'background:#fff;border-radius:10px;padding:5px 10px;line-height:0">'
-        f'<img src="data:image/png;base64,{b64}" height="44" style="display:block" alt="Shosha NZ">'
-        f'</div>'
-        if b64 else ""
-    )
-    st.markdown(
-        f'<div class="hero" style="display:flex;align-items:center;justify-content:space-between">'
-        f'<div><h1>{title}</h1><p>{subtitle}</p></div>'
-        f'{logo_badge}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    logo_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
+    if _os.path.exists(logo_path):
+        c_text, c_logo = st.columns([5, 1])
+        with c_text:
+            st.markdown(
+                f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
+                unsafe_allow_html=True,
+            )
+        with c_logo:
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            st.image(logo_path, use_container_width=True)
+    else:
+        st.markdown(
+            f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
+            unsafe_allow_html=True,
+        )
 
 
 def downloads(df: pd.DataFrame, stem: str, summary: dict | None = None) -> None:
