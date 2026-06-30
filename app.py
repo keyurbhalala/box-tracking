@@ -147,8 +147,19 @@ st.markdown(
 
 
 def hero(title: str, subtitle: str) -> None:
+    b64 = _load_logo_b64()
+    logo_badge = (
+        f'<div style="flex-shrink:0;margin-left:20px;'
+        f'background:#fff;border-radius:10px;padding:5px 10px;line-height:0">'
+        f'<img src="data:image/png;base64,{b64}" height="44" style="display:block" alt="Shosha NZ">'
+        f'</div>'
+        if b64 else ""
+    )
     st.markdown(
-        f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
+        f'<div class="hero" style="display:flex;align-items:center;justify-content:space-between">'
+        f'<div><h1>{title}</h1><p>{subtitle}</p></div>'
+        f'{logo_badge}'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -1737,8 +1748,7 @@ def _render_pin_screen() -> None:
     # PIN screen logo — use st.image if available, else HTML fallback
     _pin_logo = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
     if _os.path.exists(_pin_logo):
-        _, _lc, _ = st.columns([1, 2, 1])
-        _lc.image(_pin_logo, use_container_width=True)
+        st.image(_pin_logo, use_container_width=True)
     else:
         st.markdown(
             '<div style="text-align:center;font-size:42px;margin-bottom:4px">📦</div>',
