@@ -147,12 +147,8 @@ st.markdown(
 
 
 def hero(title: str, subtitle: str) -> None:
-    logo = _logo_html(height=52)
     st.markdown(
-        f'<div class="hero" style="display:flex;align-items:center;justify-content:space-between">'
-        f'<div><h1>{title}</h1><p>{subtitle}</p></div>'
-        f'<div style="flex-shrink:0;margin-left:16px">{logo}</div>'
-        f'</div>',
+        f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
         unsafe_allow_html=True,
     )
 
@@ -1738,11 +1734,19 @@ def _render_pin_screen() -> None:
     """, unsafe_allow_html=True)
 
     # ── Header ────────────────────────────────────────────────────────────────
+    # PIN screen logo — use st.image if available, else HTML fallback
+    _pin_logo = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
+    if _os.path.exists(_pin_logo):
+        _, _lc, _ = st.columns([1, 2, 1])
+        _lc.image(_pin_logo, use_container_width=True)
+    else:
+        st.markdown(
+            '<div style="text-align:center;font-size:42px;margin-bottom:4px">📦</div>',
+            unsafe_allow_html=True,
+        )
     st.markdown(
-        f'<div style="text-align:center;margin-bottom:20px">'
-        f'<div style="display:flex;justify-content:center">{_logo_html(height=60)}</div>'
-        f'<p style="color:#999;font-size:14px;margin:14px 0 0">Enter your PIN to continue</p>'
-        f'</div>',
+        '<p style="text-align:center;color:#999;font-size:14px;margin:10px 0 0">'
+        'Enter your PIN to continue</p>',
         unsafe_allow_html=True,
     )
 
@@ -1817,11 +1821,12 @@ role = st.session_state["pin_role"]
 visible_pages = PAGES if role == "admin" else {k: PAGES[k] for k in GENERAL_PAGES}
 
 with st.sidebar:
-    st.markdown(
-        f'<div style="display:flex;justify-content:center;margin-bottom:8px">'
-        f'{_logo_html(height=44)}</div>',
-        unsafe_allow_html=True,
-    )
+    logo_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
+    if _os.path.exists(logo_path):
+        st.image(logo_path, use_container_width=True)
+    else:
+        st.markdown("## 📦 Shipment Tracker")
+    st.markdown("<div style='height:2px'></div>", unsafe_allow_html=True)
     page = st.radio("Navigation", list(visible_pages), label_visibility="collapsed")
     st.divider()
     if role == "admin":
