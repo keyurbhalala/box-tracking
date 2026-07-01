@@ -460,9 +460,11 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
     failed = [r for r in results if not r.success]
 
     st.divider()
+    label = st.session_state.get("_courier_results", {}).get("label", "")
+    name_prefix = f"**{label} — Shipment #{shipment_id}**" if label else f"**Shipment #{shipment_id}**"
     if booked:
         st.success(
-            f"✅ Shipment #{shipment_id} saved. "
+            f"✅ {name_prefix} saved. "
             f"{len(booked)} courier booking{'s' if len(booked) != 1 else ''} confirmed with Starshipit."
         )
     if failed:
@@ -501,6 +503,14 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
 
 def render_new_shipment() -> None:
     hero("New Shipment", "Record boxes by store in one quick entry")
+
+    # ── Post-save confirmation (prevents duplicate entry) ────────────────────
+    if "_shipment_saved" in st.session_state:
+        saved = st.session_state.pop("_shipment_saved")
+        st.success(saved["message"])
+        if st.button("➕ Record Another Shipment", type="primary", use_container_width=True):
+            st.rerun()
+        return
 
     # ── Group mode toggle (outside form — updates UI immediately) ────────────
     group_mode = st.radio(
@@ -692,6 +702,9 @@ def render_new_shipment() -> None:
                 st.error(str(exc))
                 return
 
+            _c_label = selected_group if group_mode == "Existing Group" else (
+                selected_store_names[0] if selected_store_names else "Custom"
+            )
             stores_to_book = [d for d in details if d["boxes"] > 0]
             results = _build_courier_stores(
                 shipment_id, stores_to_book, service_code
@@ -699,6 +712,7 @@ def render_new_shipment() -> None:
             if results:
                 st.session_state["_courier_results"] = {
                     "shipment_id": shipment_id,
+                    "label": _c_label,
                     "results": results,
                 }
 
@@ -752,11 +766,17 @@ def render_new_shipment() -> None:
             except Exception as exc:
                 st.error(str(exc))
                 return
-            message = f"Shipment #{shipment_id} saved with {total:,} boxes."
+            # Build a human-readable label from group/store name
+            if group_mode == "Existing Group":
+                _label = selected_group
+            else:
+                _label = selected_store_names[0] if selected_store_names else "Custom"
+            message = f"**{_label} — Shipment #{shipment_id}** saved with {total:,} boxes."
             if pallet_id:
                 message += f"  Pallet ID: **{pallet_id}**"
-            st.success(message)
+            st.session_state["_shipment_saved"] = {"message": message}
             st.session_state.pop("_courier_results", None)
+            st.rerun()
 
     # ── Courier booking results panel ─────────────────────────────────────────
     if "_courier_results" in st.session_state:
@@ -809,14 +829,25 @@ def render_history() -> None:
 
     st.divider()
     st.subheader("Edit or delete a shipment")
-    shipment_options = sorted(df["shipment_id"].unique().tolist()) if not df.empty else []
+    shipment_options = sorted(df["shipment_id"].unique().tolist(), reverse=True) if not df.empty else []
     if not shipment_options:
         st.caption("No shipments in the current filter.")
         return
+    # Build label map: "GroupName — #74 (2026-07-01)"
+    _ship_meta = (
+        df[["shipment_id", "Group", "Date"]]
+        .drop_duplicates("shipment_id")
+        .set_index("shipment_id")
+    )
+    def _ship_label(sid: int) -> str:
+        row = _ship_meta.loc[sid] if sid in _ship_meta.index else None
+        if row is None:
+            return f"Shipment #{sid}"
+        return f"{row['Group']} — #{sid} ({row['Date']})"
     selected_id = st.selectbox(
         "Shipment",
         shipment_options,
-        format_func=lambda value: f"Shipment #{value}",
+        format_func=_ship_label,
     )
     header, current_details = get_shipment(int(selected_id))
     all_stores = get_stores(active_only=False)
