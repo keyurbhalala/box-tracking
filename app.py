@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -589,11 +588,28 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
 def render_new_shipment() -> None:
     hero("New Shipment", "Record boxes by store in one quick entry")
 
-    # ── Post-save confirmation (prevents duplicate entry) ────────────────────
+    # ── Post-save: Pallet / Delivery ─────────────────────────────────────────
     if "_shipment_saved" in st.session_state:
         saved = st.session_state.pop("_shipment_saved")
         st.success(saved["message"])
         if st.button("➕ Record Another Shipment", type="primary", use_container_width=True):
+            st.rerun()
+        return
+
+    # ── Post-save: Courier (auto-print / download, then one-click reset) ─────
+    if "_courier_results" in st.session_state:
+        state = st.session_state["_courier_results"]
+        st.success(state["message"])
+        if state.get("labels_to_print"):
+            _auto_print_labels(state["labels_to_print"])
+        if state.get("n_failed", 0) > 0:
+            st.warning(
+                f"⚠️ {state['n_failed']} store(s) could not be booked — "
+                "use **Retry** in History & Edit."
+            )
+        if st.button("➕ Record Another Shipment", type="primary", use_container_width=True):
+            st.session_state.pop("_courier_results", None)
+            st.session_state.pop("_store_labels", None)
             st.rerun()
         return
 
@@ -807,8 +823,6 @@ def render_new_shipment() -> None:
                 for r in booked
                 if r.consignment_id in store_labels and store_labels[r.consignment_id]
             ]
-            if labels_to_print:
-                _auto_print_labels(labels_to_print)
 
             # ── Build saved message ───────────────────────────────────────────
             msg_parts = [
@@ -816,18 +830,19 @@ def render_new_shipment() -> None:
                 f"{n_booked} courier label{'s' if n_booked != 1 else ''} booked.",
             ]
             if not labels_to_print and n_booked > 0:
-                msg_parts.append("⚠️ Label PDFs not returned by Starshipit — check History to retry.")
-            if n_failed > 0:
                 msg_parts.append(
-                    f"⚠️ {n_failed} store{'s' if n_failed != 1 else ''} could not be booked — "
-                    "use **Retry** in History & Edit."
+                    "⚠️ Label PDFs not returned by Starshipit — check History to retry."
                 )
-            st.session_state["_shipment_saved"] = {"message": "  ".join(msg_parts)}
-            st.session_state.pop("_courier_results", None)
-            st.session_state.pop("_store_labels", None)
 
-            # Give the JS component time to fire print/download, then reload
-            time.sleep(3.5)
+            # Store results in session_state and rerun immediately.
+            # The auto-print component renders on the NEXT cycle (when
+            # courier_save is already False), so create_shipment is never
+            # called twice.
+            st.session_state["_courier_results"] = {
+                "message":        "  ".join(msg_parts),
+                "labels_to_print": labels_to_print,
+                "n_failed":       n_failed,
+            }
             st.rerun()
 
     # ══════════════════════════════════════════════════════════════════════════
