@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -452,6 +453,90 @@ def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC
     st.components.v1.html(html, height=65)
 
 
+def _auto_print_labels(labels: list[tuple[bytes, str]], printer: str | None = None) -> None:
+    """
+    Auto-print all labels via the warehouse print server.
+    Falls back to browser download for any label if the server is offline.
+    Renders a silent status div — no buttons needed.
+    labels: list of (pdf_bytes, store_name)
+    """
+    import base64 as _b64_local, json as _json
+    server_url = PRINT_SERVER_URL.rstrip("/")
+    _printer = (printer or "Honeywell PC42d (203 dpi)").replace("'", "\\'")
+    labels_json = _json.dumps([
+        {"name": name.replace('"', ''), "b64": _b64_local.b64encode(pdf).decode()}
+        for pdf, name in labels
+    ])
+    html = f"""
+    <div id="aplbl_status" style="font-family:sans-serif;font-size:13px;
+      color:#aaa;padding:6px 0;min-height:24px">⏳ Sending labels to printer…</div>
+    <script>
+    (async function() {{
+      const el = document.getElementById('aplbl_status');
+      const labels = {labels_json};
+      const SERVER = '{server_url}';
+      const PRINTER = '{_printer}';
+
+      // ── 1. Ping print server ───────────────────────────────────────────────
+      let serverUp = false;
+      try {{
+        const ping = await fetch(SERVER + '/ping',
+          {{method:'GET', signal: AbortSignal.timeout(3000)}});
+        serverUp = ping.ok;
+      }} catch(e) {{}}
+
+      // ── 2. Print or download each label ───────────────────────────────────
+      let printed = 0, downloaded = 0, errors = 0;
+      for (const lbl of labels) {{
+        const bytes = Uint8Array.from(atob(lbl.b64), c => c.charCodeAt(0));
+        const blob  = new Blob([bytes], {{type: 'application/pdf'}});
+
+        let didPrint = false;
+        if (serverUp) {{
+          try {{
+            const resp = await fetch(
+              SERVER + '/print?printer=' + encodeURIComponent(PRINTER),
+              {{method:'POST', body:blob,
+                headers:{{'Content-Type':'application/pdf'}},
+                signal: AbortSignal.timeout(20000)}}
+            );
+            const data = await resp.json();
+            if (data.success) {{ printed++; didPrint = true; }}
+          }} catch(e) {{}}
+        }}
+
+        if (!didPrint) {{
+          // Download fallback — triggers immediately in browser
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = lbl.name.replace(/[^a-zA-Z0-9_\\- ]/g,'_') + '.pdf';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {{ URL.revokeObjectURL(a.href); a.remove(); }}, 8000);
+          downloaded++;
+        }}
+      }}
+
+      // ── 3. Update status text ──────────────────────────────────────────────
+      if (printed > 0 && downloaded === 0) {{
+        el.textContent = '✅ ' + printed + ' label(s) sent to printer.';
+        el.style.color = '#4caf50';
+      }} else if (downloaded > 0 && printed === 0) {{
+        el.textContent = '⬇️ Print server offline — ' + downloaded + ' label(s) downloaded to your computer.';
+        el.style.color = '#ff9800';
+      }} else if (printed > 0 || downloaded > 0) {{
+        el.textContent = '✅ ' + printed + ' printed  ⬇️ ' + downloaded + ' downloaded.';
+        el.style.color = '#4caf50';
+      }} else {{
+        el.textContent = '⚠️ Could not print or download labels — check print server.';
+        el.style.color = '#f44';
+      }}
+    }})();
+    </script>
+    """
+    st.components.v1.html(html, height=48)
+
+
 def _render_courier_results(shipment_id: int, results: list) -> None:
     """Display the per-store courier booking results table."""
     from starshipit import tracking_url, SERVICE_OPTIONS
@@ -658,7 +743,7 @@ def render_new_shipment() -> None:
 
         st.markdown("---")
         courier_save = st.button(
-            "Save Shipment & Book Courier",
+            "🖨 Save & Print Labels",
             type="primary",
             use_container_width=True,
             key="save_courier_btn",
@@ -706,15 +791,44 @@ def render_new_shipment() -> None:
                 selected_store_names[0] if selected_store_names else "Custom"
             )
             stores_to_book = [d for d in details if d["boxes"] > 0]
-            results = _build_courier_stores(
-                shipment_id, stores_to_book, service_code
-            )
-            if results:
-                st.session_state["_courier_results"] = {
-                    "shipment_id": shipment_id,
-                    "label": _c_label,
-                    "results": results,
-                }
+
+            with st.spinner("Booking with Starshipit…"):
+                results = _build_courier_stores(shipment_id, stores_to_book, service_code)
+
+            booked  = [r for r in results if r.success]
+            failed  = [r for r in results if not r.success]
+            n_booked = len(booked)
+            n_failed = len(failed)
+
+            # ── Auto-print / download labels ──────────────────────────────────
+            store_labels: dict = st.session_state.get("_store_labels", {})
+            labels_to_print = [
+                (store_labels[r.consignment_id], r.store_name)
+                for r in booked
+                if r.consignment_id in store_labels and store_labels[r.consignment_id]
+            ]
+            if labels_to_print:
+                _auto_print_labels(labels_to_print)
+
+            # ── Build saved message ───────────────────────────────────────────
+            msg_parts = [
+                f"**{_c_label} — Shipment #{shipment_id}** saved.",
+                f"{n_booked} courier label{'s' if n_booked != 1 else ''} booked.",
+            ]
+            if not labels_to_print and n_booked > 0:
+                msg_parts.append("⚠️ Label PDFs not returned by Starshipit — check History to retry.")
+            if n_failed > 0:
+                msg_parts.append(
+                    f"⚠️ {n_failed} store{'s' if n_failed != 1 else ''} could not be booked — "
+                    "use **Retry** in History & Edit."
+                )
+            st.session_state["_shipment_saved"] = {"message": "  ".join(msg_parts)}
+            st.session_state.pop("_courier_results", None)
+            st.session_state.pop("_store_labels", None)
+
+            # Give the JS component time to fire print/download, then reload
+            time.sleep(3.5)
+            st.rerun()
 
     # ══════════════════════════════════════════════════════════════════════════
     # PALLET / DELIVERY — standard form (no per-box dims needed)
@@ -778,10 +892,7 @@ def render_new_shipment() -> None:
             st.session_state.pop("_courier_results", None)
             st.rerun()
 
-    # ── Courier booking results panel ─────────────────────────────────────────
-    if "_courier_results" in st.session_state:
-        state = st.session_state["_courier_results"]
-        _render_courier_results(state["shipment_id"], state["results"])
+    # (Courier results are handled inline during save — no separate panel needed)
 
 
 def render_history() -> None:
