@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -1828,6 +1830,58 @@ def _get_pins() -> tuple[str, str]:
     return admin, general
 
 
+def _remember_hours() -> float:
+    """
+    How many hours an unlocked PIN session should stay unlocked.
+
+    The PIN screen was reappearing after the browser tab sat idle for a
+    while — that's Streamlit dropping the WebSocket connection and starting
+    a brand-new (locked) session, not an intentional timer. To fix that we
+    remember the unlock in the page URL (see `_make_auth_token` /
+    `_verify_auth_token` below) so a reconnect doesn't force a re-login.
+    Override with AUTH_REMEMBER_HOURS in secrets.toml if 12h isn't right.
+    """
+    try:
+        return float(st.secrets.get("AUTH_REMEMBER_HOURS", 12))
+    except Exception:
+        return 12.0
+
+
+def _token_secret() -> str:
+    try:
+        return str(st.secrets.get("APP_SECRET", "shosha-box-tracker"))
+    except Exception:
+        return "shosha-box-tracker"
+
+
+def _make_auth_token(role: str) -> str:
+    """Create a signed 'role:expiry:signature' token good for _remember_hours()."""
+    expiry = int(time.time() + _remember_hours() * 3600)
+    sig = hashlib.sha256(f"{role}:{expiry}:{_token_secret()}".encode()).hexdigest()[:16]
+    return f"{role}:{expiry}:{sig}"
+
+
+def _verify_auth_token(token: str) -> str | None:
+    """Return the role encoded in `token` if it's valid and not expired, else None."""
+    try:
+        role, expiry_s, sig = token.split(":")
+        expiry = int(expiry_s)
+    except (ValueError, AttributeError):
+        return None
+    if role not in ("admin", "general") or time.time() > expiry:
+        return None
+    expected = hashlib.sha256(f"{role}:{expiry}:{_token_secret()}".encode()).hexdigest()[:16]
+    return role if sig == expected else None
+
+
+def _clear_remembered_login() -> None:
+    st.session_state.pop("pin_role", None)
+    try:
+        del st.query_params["auth"]
+    except KeyError:
+        pass
+
+
 def _render_pin_screen() -> None:
     """
     Pure-Python PIN pad. All logic in Python session_state — no JS bridge.
@@ -1840,6 +1894,9 @@ def _render_pin_screen() -> None:
         st.session_state["_pin_digits"] = ""
 
     pin_val = st.session_state["_pin_digits"]
+
+    # ── Marker so the keyboard listener below knows the PIN screen is showing ──
+    st.markdown('<div id="pin-screen-marker" style="display:none"></div>', unsafe_allow_html=True)
 
     # ── CSS ───────────────────────────────────────────────────────────────────
     st.markdown("""
@@ -1901,6 +1958,55 @@ def _render_pin_screen() -> None:
       }
     </style>
     """, unsafe_allow_html=True)
+
+    # ── Keyboard support ──────────────────────────────────────────────────────
+    # Lets a PC user type the PIN on their keyboard instead of clicking with the
+    # mouse. Streamlit's digit/⌫/Enter widgets are real <button> elements in the
+    # parent page, so we attach one keydown listener (guarded so it's only added
+    # once, and only acts while the pin-screen-marker div above is present) and
+    # simply click the matching button — no custom component / JS bridge needed.
+    st.components.v1.html(
+        """
+        <script>
+        (function() {
+          try {
+            var doc = window.parent.document;
+            if (doc.__pinKeyListenerAttached) return;
+            doc.__pinKeyListenerAttached = true;
+            doc.addEventListener('keydown', function(e) {
+              if (!doc.getElementById('pin-screen-marker')) return; // not on PIN screen
+              var tag = (e.target && e.target.tagName) || '';
+              if (tag === 'INPUT' || tag === 'TEXTAREA') return; // don't hijack real inputs
+              var buttons = doc.querySelectorAll('div[data-testid="stButton"] button');
+              function clickByText(match) {
+                for (var i = 0; i < buttons.length; i++) {
+                  if (buttons[i].textContent.trim() === match && !buttons[i].disabled) {
+                    buttons[i].click();
+                    return true;
+                  }
+                }
+                return false;
+              }
+              if (e.key >= '0' && e.key <= '9') {
+                if (clickByText(e.key)) e.preventDefault();
+              } else if (e.key === 'Backspace') {
+                if (clickByText('⌫')) e.preventDefault();
+              } else if (e.key === 'Enter') {
+                for (var i = 0; i < buttons.length; i++) {
+                  if (buttons[i].textContent.indexOf('Enter') !== -1 && !buttons[i].disabled) {
+                    buttons[i].click();
+                    e.preventDefault();
+                    break;
+                  }
+                }
+              }
+            });
+          } catch (err) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
     # ── Header ────────────────────────────────────────────────────────────────
     # PIN screen logo — use st.image if available, else HTML fallback
@@ -1970,9 +2076,11 @@ def _render_pin_screen() -> None:
         p = st.session_state["_pin_digits"]
         if p == admin_pin:
             st.session_state.update({"pin_role": "admin", "_pin_digits": ""})
+            st.query_params["auth"] = _make_auth_token("admin")
             st.rerun()
         elif p == general_pin:
             st.session_state.update({"pin_role": "general", "_pin_digits": ""})
+            st.query_params["auth"] = _make_auth_token("general")
             st.rerun()
         else:
             st.session_state.update({"_pin_error": True, "_pin_digits": ""})
@@ -1982,8 +2090,16 @@ def _render_pin_screen() -> None:
 # ── Main app (post-login) ─────────────────────────────────────────────────────
 
 if "pin_role" not in st.session_state:
-    _render_pin_screen()
-    st.stop()
+    # Session got reset (idle tab, WiFi drop, sleep) — if the browser still has
+    # a valid, unexpired unlock token in the URL, restore the login instead of
+    # forcing a re-entry. See _make_auth_token / _remember_hours above.
+    _token = st.query_params.get("auth")
+    _restored_role = _verify_auth_token(_token) if _token else None
+    if _restored_role:
+        st.session_state["pin_role"] = _restored_role
+    else:
+        _render_pin_screen()
+        st.stop()
 
 role = st.session_state["pin_role"]
 visible_pages = PAGES if role == "admin" else {k: PAGES[k] for k in GENERAL_PAGES}
@@ -2002,7 +2118,7 @@ with st.sidebar:
     else:
         st.caption("👤 General")
     if st.button("🔒 Lock", use_container_width=True):
-        del st.session_state["pin_role"]
+        _clear_remembered_login()
         st.rerun()
     st.caption("Data stored in Supabase and backed by an audit trail.")
 
