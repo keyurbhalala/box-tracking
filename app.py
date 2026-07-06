@@ -2004,6 +2004,8 @@ def _render_pin_screen() -> None:
               }
             };
             doc.addEventListener('keydown', doc.__pinKeyHandler);
+            // Auto-focus the parent window so keyboard works immediately on load
+            window.parent.focus();
           } catch (err) {}
         })();
         </script>
