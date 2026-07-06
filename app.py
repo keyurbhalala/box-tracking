@@ -1971,9 +1971,11 @@ def _render_pin_screen() -> None:
         (function() {
           try {
             var doc = window.parent.document;
-            if (doc.__pinKeyListenerAttached) return;
-            doc.__pinKeyListenerAttached = true;
-            doc.addEventListener('keydown', function(e) {
+            // Remove any previous listener registered by an earlier render
+            if (doc.__pinKeyHandler) {
+              doc.removeEventListener('keydown', doc.__pinKeyHandler);
+            }
+            doc.__pinKeyHandler = function(e) {
               if (!doc.getElementById('pin-screen-marker')) return; // not on PIN screen
               var tag = (e.target && e.target.tagName) || '';
               if (tag === 'INPUT' || tag === 'TEXTAREA') return; // don't hijack real inputs
@@ -2000,7 +2002,8 @@ def _render_pin_screen() -> None:
                   }
                 }
               }
-            });
+            };
+            doc.addEventListener('keydown', doc.__pinKeyHandler);
           } catch (err) {}
         })();
         </script>
@@ -2045,46 +2048,48 @@ def _render_pin_screen() -> None:
     else:
         st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
 
-    # ── Digit buttons ─────────────────────────────────────────────────────────
-    def press(d: str) -> None:
+    # ── Digit / delete callbacks (on_click fires BEFORE rerender so dots sync) ──
+    def _press(d: str) -> None:
         if len(st.session_state["_pin_digits"]) < 4:
             st.session_state["_pin_digits"] += d
 
+    def _del_digit() -> None:
+        st.session_state["_pin_digits"] = st.session_state["_pin_digits"][:-1]
+
+    def _enter_pin() -> None:
+        p = st.session_state["_pin_digits"]
+        if p == admin_pin:
+            st.session_state.update({"pin_role": "admin", "_pin_digits": ""})
+            st.query_params["auth"] = _make_auth_token("admin")
+        elif p == general_pin:
+            st.session_state.update({"pin_role": "general", "_pin_digits": ""})
+            st.query_params["auth"] = _make_auth_token("general")
+        else:
+            st.session_state.update({"_pin_error": True, "_pin_digits": ""})
+
+    # ── Digit buttons ─────────────────────────────────────────────────────────
     for row in [("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9")]:
         cols = st.columns(3)
         for col, digit in zip(cols, row):
-            if col.button(digit, key=f"pk{digit}", use_container_width=True):
-                press(digit)
+            col.button(digit, key=f"pk{digit}", use_container_width=True,
+                       on_click=_press, args=(digit,))
 
     # Last row: blank | 0 | ⌫
     c1, c2, c3 = st.columns(3)
     c1.markdown("")
-    if c2.button("0", key="pk0", use_container_width=True):
-        press("0")
-    if c3.button("⌫", key="pkdel", use_container_width=True):
-        st.session_state["_pin_digits"] = st.session_state["_pin_digits"][:-1]
+    c2.button("0", key="pk0", use_container_width=True, on_click=_press, args=("0",))
+    c3.button("⌫", key="pkdel", use_container_width=True, on_click=_del_digit)
 
     # ── Enter button ──────────────────────────────────────────────────────────
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-    if st.button(
+    st.button(
         "✓  Enter",
         key="pkenter",
         use_container_width=True,
         type="primary",
         disabled=len(st.session_state["_pin_digits"]) < 4,
-    ):
-        p = st.session_state["_pin_digits"]
-        if p == admin_pin:
-            st.session_state.update({"pin_role": "admin", "_pin_digits": ""})
-            st.query_params["auth"] = _make_auth_token("admin")
-            st.rerun()
-        elif p == general_pin:
-            st.session_state.update({"pin_role": "general", "_pin_digits": ""})
-            st.query_params["auth"] = _make_auth_token("general")
-            st.rerun()
-        else:
-            st.session_state.update({"_pin_error": True, "_pin_digits": ""})
-            st.rerun()
+        on_click=_enter_pin,
+    )
 
 
 # ── Main app (post-login) ─────────────────────────────────────────────────────
