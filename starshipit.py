@@ -37,10 +37,10 @@ STARSHIPIT_API_BASE = "https://api.starshipit.com/api"
 
 NZ_POST_TRACKING_URL = "https://www.nzpost.co.nz/tools/tracking/item/{}"
 
-DEFAULT_SERVICE_CODE = "CPOLP"          # CourierPost standard (NZ Post ParcelLabel code)
+DEFAULT_SERVICE_CODE = "CPOLE"          # NZ Post Courier Economy Parcel (confirmed service code for this account)
 
 SERVICE_OPTIONS: dict[str, str] = {
-    "CourierPost Standard (CPOLP)": "CPOLP",
+    "Courier Economy Parcel (CPOLE)": "CPOLE",
     "ParcelPost Standard (IWXOLP)": "IWXOLP",
 }
 
