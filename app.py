@@ -385,14 +385,97 @@ except Exception:
 
 
 # ── Signature pad — vanilla JS canvas registered as a Streamlit component ─────
-# Replaces streamlit-drawable-canvas (unmaintained, causes native segfault on
-# current Streamlit component protocol).  The component lives in
-# signature_component/index.html and communicates back via
-# Streamlit.setComponentValue(dataURL).
-_signature_pad = st.components.v1.declare_component(
-    "signature_pad",
-    path=_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "signature_component"),
-)
+# The HTML is written to /tmp at startup so it works on Streamlit Cloud
+# (where /mount/src/... is read-only) without requiring a committed directory.
+def _setup_signature_component():
+    import tempfile as _tmp
+    _HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       background: transparent; padding: 4px 2px; }
+#sig { border: 2px solid #d1d5db; border-radius: 8px; background: #ffffff;
+       display: block; touch-action: none; cursor: crosshair;
+       width: 100%; height: 150px; }
+.btns { margin-top: 8px; display: flex; gap: 8px; }
+button { padding: 7px 18px; border: none; border-radius: 6px;
+         font-size: 13px; font-weight: 500; cursor: pointer; }
+button:active { opacity: 0.75; }
+#btnClear { background: #e5e7eb; color: #374151; }
+#btnSave  { background: #0f766e; color: #ffffff; }
+#btnSave:disabled { background: #9ca3af; cursor: default; }
+#hint { margin-top: 6px; font-size: 12px; color: #6b7280; min-height: 16px; }
+</style>
+</head>
+<body>
+<canvas id="sig"></canvas>
+<div class="btns">
+  <button id="btnClear" onclick="clearPad()">Clear</button>
+  <button id="btnSave" onclick="confirmSig()" disabled>Confirm Signature</button>
+</div>
+<p id="hint">Draw signature above, then tap Confirm Signature.</p>
+<script src="https://unpkg.com/streamlit-component-lib@2.0.0/dist/StreamlitComponentBase.js"></script>
+<script>
+const canvas = document.getElementById("sig");
+const ctx    = canvas.getContext("2d");
+let drawing = false, hasDrawn = false;
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  canvas.width  = Math.max(r.width, 300);
+  canvas.height = 150;
+  ctx.lineWidth = 2.5; ctx.lineCap = "round";
+  ctx.lineJoin  = "round"; ctx.strokeStyle = "#111111";
+}
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: (t.clientX-r.left)*(canvas.width/r.width),
+           y: (t.clientY-r.top)*(canvas.height/r.height) };
+}
+canvas.addEventListener("mousedown", e => { drawing=true; ctx.beginPath(); const p=pos(e); ctx.moveTo(p.x,p.y); });
+canvas.addEventListener("mousemove", e => { if(!drawing) return; const p=pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); mark(); });
+canvas.addEventListener("mouseup",    () => drawing=false);
+canvas.addEventListener("mouseleave", () => drawing=false);
+canvas.addEventListener("touchstart", e => { e.preventDefault(); drawing=true; ctx.beginPath(); const p=pos(e); ctx.moveTo(p.x,p.y); }, {passive:false});
+canvas.addEventListener("touchmove",  e => { e.preventDefault(); if(!drawing) return; const p=pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); mark(); }, {passive:false});
+canvas.addEventListener("touchend",   () => drawing=false);
+function mark() {
+  if (!hasDrawn) { hasDrawn=true; document.getElementById("btnSave").disabled=false;
+    document.getElementById("hint").textContent="Tap Confirm Signature when done."; }
+}
+function clearPad() {
+  ctx.clearRect(0,0,canvas.width,canvas.height); hasDrawn=false;
+  document.getElementById("btnSave").disabled=true;
+  document.getElementById("hint").textContent="Draw signature above, then tap Confirm Signature.";
+  Streamlit.setComponentValue(null);
+}
+function confirmSig() {
+  if (!hasDrawn) return;
+  document.getElementById("hint").textContent="\\u2705 Signature confirmed.";
+  document.getElementById("btnSave").disabled=true;
+  Streamlit.setComponentValue(canvas.toDataURL("image/png"));
+}
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, () => {});
+window.addEventListener("load", () => {
+  resize();
+  requestAnimationFrame(() => { Streamlit.setFrameHeight(document.body.scrollHeight+16); Streamlit.setComponentReady(); });
+});
+window.addEventListener("resize", () => { resize(); Streamlit.setFrameHeight(document.body.scrollHeight+16); });
+</script>
+</body>
+</html>"""
+    comp_dir = _os.path.join(_tmp.gettempdir(), "shosha_signature_pad")
+    _os.makedirs(comp_dir, exist_ok=True)
+    with open(_os.path.join(comp_dir, "index.html"), "w", encoding="utf-8") as _fh:
+        _fh.write(_HTML)
+    return st.components.v1.declare_component("signature_pad", path=comp_dir)
+
+_signature_pad = _setup_signature_component()
 
 
 def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC42d (203 dpi)") -> None:
