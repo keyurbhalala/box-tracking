@@ -4,21 +4,36 @@ from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
 import pandas as pd
+from sqlalchemy import text as _sa_text
 
 import streamlit as st
 
-from database import audit, connection
+from database import audit, connection, get_engine
 
 
 METHODS = ["Courier", "Pallet", "Delivery"]
 
 
 def query_df(sql: str, params: Iterable[Any] = ()) -> pd.DataFrame:
-    """Run a SELECT and return a DataFrame. Converts ? → %s for psycopg2."""
-    with connection() as conn:
-        return pd.read_sql_query(
-            sql.replace("?", "%s"), conn.raw, params=tuple(params)
-        )
+    """
+    Run a SELECT and return a DataFrame via a SQLAlchemy engine.
+
+    Using the engine instead of a raw psycopg2 connection avoids the
+    pandas DeprecationWarning introduced in pandas 2.x.
+
+    Placeholder style: accepts either ``?`` (sqlite-style) or ``%s``
+    (psycopg2-style); both are converted to SQLAlchemy named params
+    ``:p0``, ``:p1``, … so that ``sqlalchemy.text()`` can bind them.
+    """
+    params_list = list(params)
+    # Normalise to %s first, then rebind to :p0, :p1, …
+    sa_sql = sql.replace("?", "%s")
+    named: dict[str, Any] = {}
+    for i, v in enumerate(params_list):
+        sa_sql = sa_sql.replace("%s", f":p{i}", 1)
+        named[f"p{i}"] = v
+    with get_engine().connect() as sa_conn:
+        return pd.read_sql_query(_sa_text(sa_sql), sa_conn, params=named)
 
 
 @st.cache_data(ttl=60)
@@ -283,14 +298,13 @@ def get_shipment(shipment_id: int) -> tuple[dict[str, Any], pd.DataFrame]:
         ).fetchone()
         if not row:
             raise ValueError("Shipment not found.")
-        details = pd.read_sql_query(
+        details = query_df(
             """
             SELECT id, store_id, store_name, group_name, boxes
-            FROM shipment_details WHERE shipment_id = %s
+            FROM shipment_details WHERE shipment_id = ?
             ORDER BY store_name
             """,
-            conn.raw,
-            params=(shipment_id,),
+            (shipment_id,),
         )
         return dict(row), details
 
@@ -501,14 +515,13 @@ def pallet_lookup(pallet_id: str) -> tuple[pd.DataFrame, dict[str, Any] | None]:
         ).fetchone()
         if not header:
             return pd.DataFrame(), None
-        details = pd.read_sql_query(
+        details = query_df(
             """
             SELECT store_name AS "Store", group_name AS "Group", boxes AS "Boxes"
-            FROM shipment_details WHERE shipment_id = %s
+            FROM shipment_details WHERE shipment_id = ?
             ORDER BY store_name
             """,
-            conn.raw,
-            params=(header["id"],),
+            (header["id"],),
         )
         return details, dict(header)
 

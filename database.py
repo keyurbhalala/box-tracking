@@ -9,6 +9,8 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import streamlit as st
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 
 # ---------------------------------------------------------------------------
@@ -22,6 +24,18 @@ def _pool() -> psycopg2.pool.ThreadedConnectionPool:
         maxconn=20,
         dsn=st.secrets["DATABASE_URL"],
     )
+
+
+@st.cache_resource
+def get_engine() -> Engine:
+    """
+    SQLAlchemy engine backed by the same DATABASE_URL.
+
+    Used *only* by pd.read_sql_query() in services.py to avoid the
+    pandas DeprecationWarning about passing a raw psycopg2 connection.
+    All write operations still go through the psycopg2 pool above.
+    """
+    return create_engine(st.secrets["DATABASE_URL"])
 
 
 # ---------------------------------------------------------------------------

@@ -159,7 +159,7 @@ def hero(title: str, subtitle: str) -> None:
             )
         with c_logo:
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-            st.image(logo_path, use_container_width=True)
+            st.image(logo_path, width='stretch')
     else:
         st.markdown(
             f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>',
@@ -174,14 +174,14 @@ def downloads(df: pd.DataFrame, stem: str, summary: dict | None = None) -> None:
         to_excel_bytes(df, "Report", summary),
         file_name=f"{stem}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width='stretch',
     )
     col2.download_button(
         "Download CSV",
         to_csv_bytes(df),
         file_name=f"{stem}.csv",
         mime="text/csv",
-        use_container_width=True,
+        width='stretch',
     )
 
 
@@ -239,7 +239,7 @@ def render_dashboard() -> None:
             title="Boxes Sent by Week",
             color_discrete_sequence=["#0f766e"],
         ),
-        use_container_width=True,
+        width='stretch',
     )
     right.plotly_chart(
         px.bar(
@@ -249,7 +249,7 @@ def render_dashboard() -> None:
             title="Boxes Sent by Month",
             color_discrete_sequence=["#155e75"],
         ),
-        use_container_width=True,
+        width='stretch',
     )
     st.plotly_chart(
         px.pie(
@@ -264,7 +264,7 @@ def render_dashboard() -> None:
                 "Delivery": "#2563eb",
             },
         ),
-        use_container_width=True,
+        width='stretch',
     )
 
 
@@ -382,6 +382,17 @@ try:
     PRINT_SERVER_URL = st.secrets.get("PRINT_SERVER_URL", "https://192.168.1.16:8765")
 except Exception:
     PRINT_SERVER_URL = "https://192.168.1.16:8765"
+
+
+# ── Signature pad — vanilla JS canvas registered as a Streamlit component ─────
+# Replaces streamlit-drawable-canvas (unmaintained, causes native segfault on
+# current Streamlit component protocol).  The component lives in
+# signature_component/index.html and communicates back via
+# Streamlit.setComponentValue(dataURL).
+_signature_pad = st.components.v1.declare_component(
+    "signature_pad",
+    path=_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "signature_component"),
+)
 
 
 def _print_label_button(pdf_bytes: bytes, key: str, printer: str = "Honeywell PC42d (203 dpi)") -> None:
@@ -575,12 +586,12 @@ def _render_courier_results(shipment_id: int, results: list) -> None:
                     with link_col1:
                         _print_label_button(pdf_bytes, key=f"lbl_{r.consignment_id}")
                 elif r.label_url:
-                    link_col1.link_button("🖨 Label", r.label_url, use_container_width=True)
+                    link_col1.link_button("🖨 Label", r.label_url, width='stretch')
                 elif r.label_error:
                     c4.warning(f"Label failed: {r.label_error[:120]}")
 
                 if r.tracking_number:
-                    link_col2.link_button("📦 Track", tracking_url(r.tracking_number), use_container_width=True)
+                    link_col2.link_button("📦 Track", tracking_url(r.tracking_number), width='stretch')
             else:
                 c2.error(r.error[:120] if r.error else "Unknown error")
                 c3.markdown("—")
@@ -594,7 +605,7 @@ def render_new_shipment() -> None:
     if "_shipment_saved" in st.session_state:
         saved = st.session_state.pop("_shipment_saved")
         st.success(saved["message"])
-        if st.button("➕ Record Another Shipment", type="primary", use_container_width=True):
+        if st.button("➕ Record Another Shipment", type="primary", width='stretch'):
             st.rerun()
         return
 
@@ -609,7 +620,7 @@ def render_new_shipment() -> None:
                 f"⚠️ {state['n_failed']} store(s) could not be booked — "
                 "use **Retry** in History & Edit."
             )
-        if st.button("➕ Record Another Shipment", type="primary", use_container_width=True):
+        if st.button("➕ Record Another Shipment", type="primary", width='stretch'):
             st.session_state.pop("_courier_results", None)
             st.session_state.pop("_store_labels", None)
             st.rerun()
@@ -686,7 +697,7 @@ def render_new_shipment() -> None:
         box_editor = st.data_editor(
             shipment_editor_rows(stores),
             hide_index=True,
-            use_container_width=True,
+            width='stretch',
             disabled=["Store", "Group"],
             column_config={
                 "Store ID": None,
@@ -756,14 +767,14 @@ def render_new_shipment() -> None:
                         },
                         key=dim_key,
                         hide_index=True,
-                        use_container_width=True,
+                        width='stretch',
                     )
 
         st.markdown("---")
         courier_save = st.button(
             "🖨 Save & Print Labels",
             type="primary",
-            use_container_width=True,
+            width='stretch',
             key="save_courier_btn",
             disabled=(courier_total == 0),
         )
@@ -862,7 +873,7 @@ def render_new_shipment() -> None:
             editor = st.data_editor(
                 shipment_editor_rows(stores),
                 hide_index=True,
-                use_container_width=True,
+                width='stretch',
                 disabled=["Store", "Group"],
                 column_config={
                     "Store ID": None,
@@ -877,7 +888,7 @@ def render_new_shipment() -> None:
             )
             st.caption(f"Shipment total: **{total:,} boxes**")
             submitted = st.form_submit_button(
-                "Save Shipment", type="primary", use_container_width=True
+                "Save Shipment", type="primary", width='stretch'
             )
 
         if submitted:
@@ -952,7 +963,7 @@ def render_history() -> None:
     )
     c3.metric("Stores", f"{df['Store'].nunique():,}" if not df.empty else "0")
     display = df.drop(columns=["shipment_id"]) if not df.empty else df
-    st.dataframe(display, hide_index=True, use_container_width=True)
+    st.dataframe(display, hide_index=True, width='stretch')
     downloads(display, f"shipment_history_{start}_{end}")
 
     st.divider()
@@ -1014,7 +1025,7 @@ def render_history() -> None:
         edited = st.data_editor(
             edit_rows,
             hide_index=True,
-            use_container_width=True,
+            width='stretch',
             disabled=["Store ID", "Store", "Group"],
             column_config={
                 "Store ID": None,
@@ -1064,10 +1075,10 @@ def render_history() -> None:
                         )
                         lc1, lc2 = col4.columns(2)
                         if row.get("label_url"):
-                            lc1.link_button("🖨", row["label_url"], use_container_width=True, help="Print label")
+                            lc1.link_button("🖨", row["label_url"], width='stretch', help="Print label")
                         lc2.link_button(
                             "📦", tracking_url(str(row["tracking_number"])),
-                            use_container_width=True, help="Track parcel",
+                            width='stretch', help="Track parcel",
                         )
                     else:
                         col2.caption(str(row.get("api_error") or "No tracking number")[:100])
@@ -1089,7 +1100,7 @@ def render_history() -> None:
         "Delete Shipment",
         disabled=not confirm,
         type="secondary",
-        use_container_width=False,
+        width='content',
     ):
         delete_shipment(int(selected_id))
         st.success(f"Shipment #{selected_id} deleted. The audit record was retained.")
@@ -1126,7 +1137,7 @@ def render_store_lookup() -> None:
     c4.metric("Number of Shipments", int(df["shipment_id"].nunique()))
     display = df[["Date", "Boxes", "Method", "Pallet ID", "Notes"]].copy()
     display["Date"] = display["Date"].dt.date
-    st.dataframe(display, hide_index=True, use_container_width=True)
+    st.dataframe(display, hide_index=True, width='stretch')
     downloads(display, f"store_report_{store_name.replace(' ', '_').lower()}")
 
 
@@ -1171,7 +1182,7 @@ def render_group_reporting() -> None:
             title="Top Stores by Volume",
             color_discrete_sequence=["#0f766e"],
         ),
-        use_container_width=True,
+        width='stretch',
     )
     right.plotly_chart(
         px.line(
@@ -1182,7 +1193,7 @@ def render_group_reporting() -> None:
             title="Weekly Trend",
             color_discrete_sequence=["#155e75"],
         ),
-        use_container_width=True,
+        width='stretch',
     )
     st.plotly_chart(
         px.bar(
@@ -1192,7 +1203,7 @@ def render_group_reporting() -> None:
             title="Monthly Trend",
             color_discrete_sequence=["#f59e0b"],
         ),
-        use_container_width=True,
+        width='stretch',
     )
     display = df.drop(columns=["shipment_id"])
     downloads(
@@ -1222,7 +1233,7 @@ def render_pallet_search() -> None:
     c3.metric("Total Boxes", f"{details['Boxes'].sum():,}")
     if header["notes"]:
         st.info(header["notes"])
-    st.dataframe(details, hide_index=True, use_container_width=True)
+    st.dataframe(details, hide_index=True, width='stretch')
     downloads(
         details,
         f"pallet_report_{header['pallet_id']}",
@@ -1239,7 +1250,7 @@ def render_store_management() -> None:
     groups = get_groups(active_only=False)
     tab1, tab2 = st.tabs(["Groups", "Stores"])
     with tab1:
-        st.dataframe(groups, hide_index=True, use_container_width=True)
+        st.dataframe(groups, hide_index=True, width='stretch')
         with st.expander("Add group", expanded=groups.empty):
             with st.form("add_group"):
                 new_group = st.text_input("Group name")
@@ -1278,7 +1289,7 @@ def render_store_management() -> None:
                         st.error(str(exc))
     with tab2:
         stores = get_stores(active_only=False)
-        st.dataframe(stores, hide_index=True, use_container_width=True)
+        st.dataframe(stores, hide_index=True, width='stretch')
         if groups.empty:
             st.warning("Add a group before adding stores.")
             return
@@ -1339,17 +1350,12 @@ def render_store_management() -> None:
 def render_audit_log() -> None:
     hero("Audit Trail", "A permanent record of creates, edits, and deletions")
     df = audit_history()
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width='stretch')
     downloads(df, "audit_trail")
 
 
 def render_delivery_run() -> None:
     hero("Delivery Run", "Capture signatures store-by-store as you deliver")
-    try:
-        from streamlit_drawable_canvas import st_canvas
-    except ImportError:
-        st.error("Missing dependency: run `pip install streamlit-drawable-canvas` then restart.")
-        return
 
     runs = get_delivery_runs()
     if runs.empty:
@@ -1411,39 +1417,24 @@ def render_delivery_run() -> None:
                     placeholder="e.g. Sarah",
                 )
                 st.caption("Ask the store person to sign below:")
-                canvas_result = st_canvas(
-                    fill_color="rgba(0,0,0,0)",
-                    stroke_width=3,
-                    stroke_color="#000000",
-                    background_color="#ffffff",
-                    height=150,
-                    width=400,
-                    drawing_mode="freedraw",
-                    key=f"canvas_{shipment_id}_{row['detail_id']}",
+                # _signature_pad is a registered vanilla-JS canvas component
+                # declared at module level (replaces streamlit-drawable-canvas).
+                # Returns a PNG data URL when the user taps "Confirm Signature",
+                # or None while the pad is empty / after Clear.
+                sig_data = _signature_pad(
+                    key=f"sigpad_{shipment_id}_{row['detail_id']}",
                 )
-                if st.button("Save signature", key=f"save_{row['detail_id']}", type="primary"):
-                    if (
-                        canvas_result.image_data is not None
-                        and canvas_result.image_data.sum() > 0
-                    ):
-                        import io, base64
-                        from PIL import Image
-                        img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
-                        buf = io.BytesIO()
-                        img.save(buf, format="PNG")
-                        sig_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-                        save_signature(
-                            shipment_id=shipment_id,
-                            store_id=int(row["store_id"]),
-                            store_name=store_name,
-                            boxes=boxes,
-                            signature_data=sig_b64,
-                            signed_by=signed_by,
-                        )
-                        st.success(f"Signed for {store_name}!")
-                        st.rerun()
-                    else:
-                        st.warning("Please capture a signature before saving.")
+                if sig_data:
+                    save_signature(
+                        shipment_id=shipment_id,
+                        store_id=int(row["store_id"]),
+                        store_name=store_name,
+                        boxes=boxes,
+                        signature_data=sig_data,
+                        signed_by=signed_by,
+                    )
+                    st.success(f"Signed for {store_name}!")
+                    st.rerun()
 
 
 def render_address_book() -> None:
@@ -1483,7 +1474,7 @@ def render_address_book() -> None:
             df_raw.columns = [c.strip() for c in df_raw.columns]
 
             st.markdown(f"**Preview** — {len(df_raw)} rows found")
-            st.dataframe(df_raw.head(10), use_container_width=True, hide_index=True)
+            st.dataframe(df_raw.head(10), width='stretch', hide_index=True)
 
             if st.button("Import into Address Book", type="primary", key="do_import"):
                 records = []
@@ -1536,7 +1527,7 @@ def render_address_book() -> None:
         else:
             st.dataframe(
                 ab_df.drop(columns=["id"]),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
             st.markdown(f"*{len(ab_df)} entries*")
@@ -1678,7 +1669,7 @@ def render_address_book() -> None:
                 unmapped[["store_name", "group_name"]].rename(
                     columns={"store_name": "Store", "group_name": "Group"}
                 ),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -2017,7 +2008,7 @@ def _render_pin_screen() -> None:
     # PIN screen logo — use st.image if available, else HTML fallback
     _pin_logo = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
     if _os.path.exists(_pin_logo):
-        st.image(_pin_logo, use_container_width=True)
+        st.image(_pin_logo, width='stretch')
     else:
         st.markdown(
             '<div style="text-align:center;font-size:42px;margin-bottom:4px">📦</div>',
@@ -2073,21 +2064,21 @@ def _render_pin_screen() -> None:
     for row in [("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9")]:
         cols = st.columns(3)
         for col, digit in zip(cols, row):
-            col.button(digit, key=f"pk{digit}", use_container_width=True,
+            col.button(digit, key=f"pk{digit}", width='stretch',
                        on_click=_press, args=(digit,))
 
     # Last row: blank | 0 | ⌫
     c1, c2, c3 = st.columns(3)
     c1.markdown("")
-    c2.button("0", key="pk0", use_container_width=True, on_click=_press, args=("0",))
-    c3.button("⌫", key="pkdel", use_container_width=True, on_click=_del_digit)
+    c2.button("0", key="pk0", width='stretch', on_click=_press, args=("0",))
+    c3.button("⌫", key="pkdel", width='stretch', on_click=_del_digit)
 
     # ── Enter button ──────────────────────────────────────────────────────────
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     st.button(
         "✓  Enter",
         key="pkenter",
-        use_container_width=True,
+        width='stretch',
         type="primary",
         disabled=len(st.session_state["_pin_digits"]) < 4,
         on_click=_enter_pin,
@@ -2114,7 +2105,7 @@ visible_pages = PAGES if role == "admin" else {k: PAGES[k] for k in GENERAL_PAGE
 with st.sidebar:
     logo_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logo.png")
     if _os.path.exists(logo_path):
-        st.image(logo_path, use_container_width=True)
+        st.image(logo_path, width='stretch')
     else:
         st.markdown("## 📦 Shipment Tracker")
     st.markdown("<div style='height:2px'></div>", unsafe_allow_html=True)
@@ -2124,7 +2115,7 @@ with st.sidebar:
         st.caption("🔑 Admin")
     else:
         st.caption("👤 General")
-    if st.button("🔒 Lock", use_container_width=True):
+    if st.button("🔒 Lock", width='stretch'):
         _clear_remembered_login()
         st.rerun()
     st.caption("Data stored in Supabase and backed by an audit trail.")
