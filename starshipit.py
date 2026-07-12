@@ -37,10 +37,11 @@ STARSHIPIT_API_BASE = "https://api.starshipit.com/api"
 
 NZ_POST_TRACKING_URL = "https://www.nzpost.co.nz/tools/tracking/item/{}"
 
-DEFAULT_SERVICE_CODE = "CPOLE"          # NZ Post Courier Economy Parcel (confirmed service code for this account)
+DEFAULT_SERVICE_CODE = "CPOLP"          # NZ Post Courier Post (cheaper option, default for this account)
 
 SERVICE_OPTIONS: dict[str, str] = {
-    "Courier Economy Parcel (CPOLE)": "CPOLE",
+    "Courier Post — Cheap (CPOLP)": "CPOLP",
+    "Courier Post — Express (CPOLE)": "CPOLE",
     "ParcelPost Standard (IWXOLP)": "IWXOLP",
 }
 
@@ -208,7 +209,7 @@ def _build_payload(
             "order_number": reference,   # required by Starshipit API
             "reference":    reference,
             "carrier_name": "NZ Post Domestic",
-            "service_code": service_code,  # NZ Post product code e.g. CPOLP
+            "service_code": service_code,  # NZ Post product code e.g. CPOLP (cheap) / CPOLE (express)
             **_BOOKING_DEFAULTS,
             "sender_details": sender.as_api_dict(),
             "destination":    recipient.as_api_dict(),
@@ -329,8 +330,7 @@ def create_order(
             label_pdf  = b""
             label_error = ""
             if order_id:
-                # Use the caller-supplied service_code (default CPOLP) — confirmed
-                # as the correct NZ Post CourierPost product code for this account.
+                # Use the caller-supplied service_code (CPOLP = cheap, CPOLE = express).
                 label_pdf, label_error = _submit_for_label(
                     order_id, reprint=False, carrier_service_code=service_code
                 )
