@@ -40,8 +40,8 @@ NZ_POST_TRACKING_URL = "https://www.nzpost.co.nz/tools/tracking/item/{}"
 DEFAULT_SERVICE_CODE = "CPOLP"          # NZ Post Courier Post (cheaper option, default for this account)
 
 SERVICE_OPTIONS: dict[str, str] = {
-    "Courier Post — Express (CPOLP)": "CPOLP",
     "Courier Post — Cheap (CPOLE)": "CPOLE",
+    "Courier Post — Express (CPOLP)": "CPOLP",
     "ParcelPost Standard (IWXOLP)": "IWXOLP",
 }
 
