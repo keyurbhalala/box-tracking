@@ -283,42 +283,59 @@ def _submit_for_label(
 # ---------------------------------------------------------------------------
 
 
+
+# Keys containing "tracking" that are clearly NOT a tracking number itself
+# (status text, a URL, a history list, a date, etc.) — excluded from the
+# deep scan below so we don't pick up junk like "tracking_status": "Printed".
+_TRACKING_KEY_EXCLUDE = ("status", "url", "link", "page", "event", "history", "date")
+
+
+def _deep_collect_tracking_numbers(obj: Any, found: list[str]) -> None:
+    """
+    Recursively walk an arbitrarily-nested dict/list and collect every value
+    found under a key containing "tracking" (case-insensitive), skipping
+    keys that are obviously something else (tracking_status, tracking_url…).
+
+    Different Starshipit endpoints (the order list endpoint vs. the single
+    order detail endpoint) have been observed returning tracking numbers at
+    different nesting levels and under different key names — sometimes on
+    the order itself, sometimes per-package, sometimes under a "shipments"
+    or "consignment" sub-object. Rather than keep guessing exact paths, this
+    just searches everywhere.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = k.lower()
+            if "tracking" in lk and not any(bad in lk for bad in _TRACKING_KEY_EXCLUDE):
+                if isinstance(v, str) and v.strip() and v.strip() not in found:
+                    found.append(v.strip())
+                elif isinstance(v, (int, float)) and v:
+                    s = str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)
+                    if s not in found:
+                        found.append(s)
+            _deep_collect_tracking_numbers(v, found)
+    elif isinstance(obj, list):
+        for item in obj:
+            _deep_collect_tracking_numbers(item, found)
+
+
 def _extract_tracking_numbers(order: dict) -> str:
     """
     Pull every tracking number off an order payload and join them.
 
     A single Starshipit order can hold multiple packages — multi-box store
     shipments create one package per box — and each package gets its OWN NZ
-    Post tracking number, not a single shared one. Different Starshipit
-    endpoints have also been seen using slightly different key names for the
-    same field, so a few are checked. Returns "" if nothing has been
-    allocated yet, otherwise a comma-separated string of every distinct
+    Post tracking number, not a single shared one. Rather than checking a
+    fixed set of paths/key names (which turned out not to match what this
+    account's API actually returns), this recursively scans the entire
+    response via _deep_collect_tracking_numbers(). Returns "" if nothing has
+    been allocated yet, otherwise a comma-separated string of every distinct
     tracking number found (just one, most of the time).
     """
     if not order:
         return ""
-
-    keys = ("tracking_number", "trackingNumber", "tracking_no", "tracking")
     found: list[str] = []
-
-    pkgs = order.get("packages") or order.get("items") or []
-    for pkg in pkgs:
-        if not isinstance(pkg, dict):
-            continue
-        for k in keys:
-            v = str(pkg.get(k) or "").strip()
-            if v:
-                if v not in found:
-                    found.append(v)
-                break
-
-    if not found:
-        for k in keys:
-            v = str(order.get(k) or "").strip()
-            if v:
-                found.append(v)
-                break
-
+    _deep_collect_tracking_numbers(order, found)
     return ", ".join(found)
 
 
@@ -663,11 +680,19 @@ def get_tracking_status(order_id: str = "", tracking_number: str = "") -> dict[s
 def get_order_details(order_id: str) -> dict:
     """
     Fetch a Starshipit order by its numeric order_id.
-    Tries GET /api/orders?order_id=... (list endpoint filtered by id)
-    because GET /api/orders/{id} returns 404 on some accounts.
+
+    Calls BOTH the list endpoint (GET /api/orders?order_id=...) and the
+    single-order endpoint (GET /api/orders/{id}) and merges the results.
+    These two endpoints have been observed returning different shapes on
+    this account — e.g. one may omit per-package tracking numbers that the
+    other includes — so previously only falling back to the second endpoint
+    when the first returned nothing meant we sometimes kept using an
+    incomplete object. Merging means whichever endpoint actually has the
+    tracking data, we'll see it.
     """
+    merged: dict = {}
+
     try:
-        # Try list endpoint filtered by order_id first
         resp = requests.get(
             f"{STARSHIPIT_API_BASE}/orders",
             headers=_headers(),
@@ -677,9 +702,12 @@ def get_order_details(order_id: str) -> dict:
         log.info("Starshipit GET orders?order_id=%s [%s]: %.2000s", order_id, resp.status_code, resp.text)
         data = resp.json()
         orders = data.get("orders") or []
-        if orders:
-            return orders[0]
-        # Fallback: try path-based endpoint
+        if orders and isinstance(orders[0], dict):
+            merged.update(orders[0])
+    except Exception:
+        log.exception("Error fetching order %s via list endpoint", order_id)
+
+    try:
         resp2 = requests.get(
             f"{STARSHIPIT_API_BASE}/orders/{order_id}",
             headers=_headers(),
@@ -687,10 +715,20 @@ def get_order_details(order_id: str) -> dict:
         )
         log.info("Starshipit GET order/%s [%s]: %.2000s", order_id, resp2.status_code, resp2.text)
         data2 = resp2.json()
-        return data2.get("order") or data2
-    except Exception as exc:
-        log.exception("Error fetching order %s", order_id)
-        return {"error": str(exc)}
+        detail = data2.get("order") or data2
+        if isinstance(detail, dict):
+            # Detail endpoint's non-empty values win on key conflicts — it's
+            # usually the more complete response — but anything the list
+            # endpoint had that detail lacks is kept too.
+            for k, v in detail.items():
+                if v not in (None, "", [], {}):
+                    merged[k] = v
+    except Exception:
+        log.exception("Error fetching order %s via detail endpoint", order_id)
+
+    if not merged:
+        return {"error": "Order not found via either endpoint."}
+    return merged
 
 
 def list_available_services() -> list[dict]:
