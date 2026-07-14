@@ -2346,6 +2346,13 @@ def render_live_tracking() -> None:
                     st.caption("Not checked yet")
                 if last_checked.get(row.consignment_id):
                     st.caption(f"Checked {last_checked[row.consignment_id]}")
+                if cached and cached.get("last_updated"):
+                    # This is when the CARRIER (not us) last updated
+                    # Starshipit's cached status — Starshipit's summary
+                    # tracking_status can lag behind the carrier's real
+                    # tracking page by a day or more, so this timestamp is
+                    # the best signal of how stale "Booked"/etc. actually is.
+                    st.caption(f"Carrier last updated: {cached['last_updated']}")
                 if row.tracking_number:
                     # tracking_number can be a comma-joined list when an
                     # order has multiple packages (one per box) — the
@@ -2378,6 +2385,16 @@ def render_live_tracking() -> None:
                         st.json(extra)
                     else:
                         st.caption("No further breakdown returned by Starshipit for this order.")
+
+            # ── Tracking history — the raw carrier-side event log (same data
+            # NZ Post's own tracking page shows), surfaced because
+            # Starshipit's coarse tracking_status/status-bar above can lag a
+            # day or more behind this.
+            events = cached.get("events") if cached else None
+            if events:
+                with st.expander(f"📜 Tracking history ({len(events)} event{'s' if len(events) != 1 else ''})", expanded=False):
+                    for ev in events:
+                        st.markdown(f"**{ev['status'] or '—'}** — {ev['event_datetime']}  \n{ev['details']}")
 
 
 PAGES = {

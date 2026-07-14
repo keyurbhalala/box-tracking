@@ -679,11 +679,33 @@ def get_tracking_status(tracking_number: str = "", order_number: str = "") -> di
         )
         return {"status": "", "error": err_msg}
 
+    # Per Starshipit's docs, "results.tracking_events" is the same
+    # event-by-event history the carrier's own tracking page shows (e.g.
+    # "Collected from sender", "Processed at depot"). The top-level
+    # tracking_status field above is Starshipit's own coarse summary of
+    # that history, and can lag behind — this account has been observed
+    # showing tracking_status stuck on "Printed" for a full day after the
+    # carrier's own page already showed "Processed at depot". Surfacing the
+    # raw events (and last_updated below) lets the UI show the real, current
+    # carrier history even when the summary status hasn't caught up.
+    events_raw = record.get("tracking_events") or []
+    events: list[dict[str, str]] = []
+    if isinstance(events_raw, list):
+        for e in events_raw:
+            if isinstance(e, dict):
+                events.append({
+                    "event_datetime": str(e.get("event_datetime") or ""),
+                    "status": str(e.get("status") or ""),
+                    "details": str(e.get("details") or ""),
+                })
+    events.sort(key=lambda e: e["event_datetime"], reverse=True)
+
     return {
         "status": status,
         "last_updated": record.get("last_updated_date") or record.get("last_updated") or "",
         "carrier_name": record.get("carrier_name") or "",
         "carrier_service": record.get("carrier_service") or "",
+        "events": events,
     }
 
 
