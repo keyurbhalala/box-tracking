@@ -1151,9 +1151,15 @@ def get_store_transfers(limit: int = 50) -> pd.DataFrame:
 
 def get_active_bookings(days_back: int = 30) -> pd.DataFrame:
     """
-    Recent, successfully-booked couriers with a tracking number, combined
-    from both booking flows (warehouse -> store shipments, and store <->
-    store transfers), newest first. Powers the Live Tracking page.
+    Recent, successfully-booked couriers, combined from both booking flows
+    (warehouse -> store shipments, and store <-> store transfers), newest
+    first. Powers the Live Tracking page.
+
+    Deliberately does NOT require a tracking_number — some carriers/accounts
+    don't allocate one until the order is actually submitted for shipment,
+    so a booking can be 'Booked' with tracking_number briefly empty. Hiding
+    those rows made just-booked couriers invisible on this page. The UI
+    shows "Tracking pending" for rows where it's still empty.
     """
     cutoff = (date.today() - timedelta(days=days_back)).isoformat()
 
@@ -1172,7 +1178,6 @@ def get_active_bookings(days_back: int = 30) -> pd.DataFrame:
         FROM courier_bookings cb
         JOIN shipments s ON s.id = cb.shipment_id
         WHERE cb.booking_status = 'Booked'
-          AND cb.tracking_number IS NOT NULL AND cb.tracking_number != ''
           AND s.shipment_date >= ?
         """,
         (cutoff,),
@@ -1192,7 +1197,6 @@ def get_active_bookings(days_back: int = 30) -> pd.DataFrame:
             booking_status       AS booking_status
         FROM store_transfers
         WHERE booking_status = 'Booked'
-          AND tracking_number IS NOT NULL AND tracking_number != ''
           AND transfer_date >= ?
         """,
         (cutoff,),
