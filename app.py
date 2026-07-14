@@ -2187,6 +2187,61 @@ def _status_bar_html(tracking_status: str) -> str:
     return bar + f'<div style="font-size:12px;color:#888">{label}</div>'
 
 
+def _refresh_one_booking(row) -> None:
+    """
+    Check live status for a single booking row and cache the result.
+
+    Only ever called for one row at a time (per-row 🔄 button) — checking
+    all bookings at once was slow with dozens of rows, since each is a
+    separate Starshipit API call.
+
+    Also recovers a still-missing tracking number here (some carriers don't
+    allocate one until after booking) and persists it via
+    update_tracking_number() so it's saved for good.
+
+    Important: Starshipit's /api/track endpoint rejects requests that only
+    supply order_id with "Please specify tracking_number" — so we must NOT
+    call it until we actually have a tracking number.
+    """
+    from starshipit import get_tracking_status, get_order_details
+
+    cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
+    last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
+
+    tracking_num = str(row.tracking_number or "")
+
+    if not tracking_num and row.consignment_id:
+        try:
+            details = get_order_details(str(row.consignment_id))
+            pkgs = details.get("packages") or []
+            found = (
+                (pkgs[0].get("tracking_number", "") if pkgs else "")
+                or details.get("tracking_number", "")
+            )
+            if found:
+                update_tracking_number(row.type, int(row.id), found)
+                tracking_num = found
+        except Exception:
+            log.exception(
+                "Could not recover tracking number for %s row id=%s", row.type, row.id
+            )
+
+    if tracking_num:
+        cache[row.consignment_id] = get_tracking_status(
+            order_id=str(row.consignment_id or ""),
+            tracking_number=tracking_num,
+        )
+    else:
+        cache[row.consignment_id] = {
+            "status": "",
+            "error": "No tracking number allocated by Starshipit yet.",
+        }
+
+    last_checked[row.consignment_id] = datetime.now().strftime("%H:%M:%S")
+    st.session_state["_tracking_status_cache"] = cache
+    st.session_state["_tracking_last_checked"] = last_checked
+
+
 def render_live_tracking() -> None:
     hero("Live Tracking", "Status of recent courier bookings — warehouse shipments and store transfers")
 
@@ -2195,55 +2250,13 @@ def render_live_tracking() -> None:
         st.info("No booked couriers with tracking numbers in the last 30 days.")
         return
 
-    col1, col2 = st.columns([1, 4])
-    refresh = col1.button("🔄 Refresh live status", type="primary", width='stretch', key="tracking_refresh")
-    col2.caption(
+    st.caption(
         f"{len(bookings)} booking{'s' if len(bookings) != 1 else ''} in the last 30 days. "
-        "Live status is fetched from Starshipit only when you click Refresh."
+        "Click 🔄 on a booking to check its live status — checked one at a time so it stays fast."
     )
 
     cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
-
-    if refresh:
-        from starshipit import get_tracking_status, get_order_details
-        progress = st.progress(0, text="Checking live status…")
-        total = len(bookings)
-        recovered_any = False
-        for i, row in enumerate(bookings.itertuples()):
-            cache[row.consignment_id] = get_tracking_status(
-                order_id=str(row.consignment_id or ""),
-                tracking_number=str(row.tracking_number or ""),
-            )
-            # If this row still has no tracking number, Starshipit may have
-            # allocated one since booking. Look it up once and save it to the
-            # database so it's there for good — no more "Tracking pending"
-            # on future loads, and no need to re-fetch it again next time.
-            if not row.tracking_number and row.consignment_id:
-                try:
-                    details = get_order_details(str(row.consignment_id))
-                    pkgs = details.get("packages") or []
-                    found = (
-                        (pkgs[0].get("tracking_number", "") if pkgs else "")
-                        or details.get("tracking_number", "")
-                    )
-                    if found:
-                        update_tracking_number(row.type, int(row.id), found)
-                        recovered_any = True
-                except Exception:
-                    log.exception(
-                        "Could not recover tracking number for %s row id=%s", row.type, row.id
-                    )
-            progress.progress((i + 1) / total, text=f"Checked {row.route}…")
-        progress.empty()
-        st.session_state["_tracking_status_cache"] = cache
-        st.session_state["_tracking_last_refresh"] = datetime.now().strftime("%H:%M:%S")
-        if recovered_any:
-            # Re-query so the newly-saved tracking numbers render immediately
-            # in the loop below, instead of waiting for the next page load.
-            bookings = get_active_bookings(days_back=30)
-
-    if st.session_state.get("_tracking_last_refresh"):
-        st.caption(f"Last refreshed at {st.session_state['_tracking_last_refresh']}")
+    last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
 
     from starshipit import tracking_url
 
@@ -2251,7 +2264,7 @@ def render_live_tracking() -> None:
     for row in bookings.itertuples():
         cached = cache.get(row.consignment_id)
         with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
+            c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 2, 1])
             type_badge = "🏬" if row.type == "Warehouse Shipment" else "🔁"
             c1.markdown(f"{type_badge} **{row.type}**  \n{pd.Timestamp(row.date).strftime('%-d %b %Y')}")
             c2.markdown(f"**{row.route}**  \n`{row.tracking_number or 'Tracking pending'}`")
@@ -2262,12 +2275,20 @@ def render_live_tracking() -> None:
                 elif cached and cached.get("error"):
                     st.caption(f"⚠️ {cached['error'][:80]}")
                 else:
-                    st.caption("Click Refresh for live status")
+                    st.caption("Not checked yet")
+                if last_checked.get(row.consignment_id):
+                    st.caption(f"Checked {last_checked[row.consignment_id]}")
                 if row.tracking_number:
                     st.link_button(
                         "📦 Track", tracking_url(str(row.tracking_number)),
                         width='stretch', key=f"track_{row.type}_{row.id}",
                     )
+            with c5:
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+                if st.button("🔄", key=f"refresh_{row.type}_{row.id}", help="Check live status"):
+                    with st.spinner("Checking…"):
+                        _refresh_one_booking(row)
+                    st.rerun()
 
 
 PAGES = {
