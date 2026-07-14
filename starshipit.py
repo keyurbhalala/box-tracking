@@ -337,6 +337,25 @@ def create_order(
                 if label_error:
                     log.warning("Label generation failed for %s: %s", reference, label_error)
 
+            # Some accounts don't allocate a tracking number until the order is
+            # actually submitted to the carrier (POST /api/orders/shipment,
+            # just above) — the draft-creation response above can come back
+            # with an empty tracking_number even though the booking succeeded.
+            # Re-fetch the order once so we don't silently save an empty
+            # tracking number (which would hide this booking from Live Tracking).
+            if not tracking and order_id:
+                try:
+                    refreshed = get_order_details(order_id)
+                    refreshed_pkgs = refreshed.get("packages") or []
+                    if refreshed_pkgs:
+                        tracking = refreshed_pkgs[0].get("tracking_number", "") or tracking
+                    if not tracking:
+                        tracking = refreshed.get("tracking_number", "") or tracking
+                    if tracking:
+                        log.info("Tracking number recovered via re-fetch for order_id=%s: %s", order_id, tracking)
+                except Exception:
+                    log.exception("Could not re-fetch order %s to recover tracking number", order_id)
+
             return BookingResult(
                 success=True,
                 store_name=recipient.name,
