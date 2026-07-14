@@ -283,6 +283,45 @@ def _submit_for_label(
 # ---------------------------------------------------------------------------
 
 
+def _extract_tracking_numbers(order: dict) -> str:
+    """
+    Pull every tracking number off an order payload and join them.
+
+    A single Starshipit order can hold multiple packages — multi-box store
+    shipments create one package per box — and each package gets its OWN NZ
+    Post tracking number, not a single shared one. Different Starshipit
+    endpoints have also been seen using slightly different key names for the
+    same field, so a few are checked. Returns "" if nothing has been
+    allocated yet, otherwise a comma-separated string of every distinct
+    tracking number found (just one, most of the time).
+    """
+    if not order:
+        return ""
+
+    keys = ("tracking_number", "trackingNumber", "tracking_no", "tracking")
+    found: list[str] = []
+
+    pkgs = order.get("packages") or order.get("items") or []
+    for pkg in pkgs:
+        if not isinstance(pkg, dict):
+            continue
+        for k in keys:
+            v = str(pkg.get(k) or "").strip()
+            if v:
+                if v not in found:
+                    found.append(v)
+                break
+
+    if not found:
+        for k in keys:
+            v = str(order.get(k) or "").strip()
+            if v:
+                found.append(v)
+                break
+
+    return ", ".join(found)
+
+
 def create_order(
     sender: Address,
     recipient: Address,
@@ -312,8 +351,7 @@ def create_order(
 
         if resp.ok and data.get("success"):
             order          = data.get("order", {})
-            pkgs           = order.get("packages", [])
-            tracking       = pkgs[0].get("tracking_number", "") if pkgs else ""
+            tracking       = _extract_tracking_numbers(order)
             order_id       = str(order.get("order_id", ""))
             actual_carrier = order.get("carrier_name", "NZ Post Domestic")
             actual_svc     = order.get("service_code", "")
@@ -346,11 +384,7 @@ def create_order(
             if not tracking and order_id:
                 try:
                     refreshed = get_order_details(order_id)
-                    refreshed_pkgs = refreshed.get("packages") or []
-                    if refreshed_pkgs:
-                        tracking = refreshed_pkgs[0].get("tracking_number", "") or tracking
-                    if not tracking:
-                        tracking = refreshed.get("tracking_number", "") or tracking
+                    tracking = _extract_tracking_numbers(refreshed)
                     if tracking:
                         log.info("Tracking number recovered via re-fetch for order_id=%s: %s", order_id, tracking)
                 except Exception:
