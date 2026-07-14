@@ -2229,7 +2229,7 @@ def render_live_tracking() -> None:
             c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
             type_badge = "🏬" if row.type == "Warehouse Shipment" else "🔁"
             c1.markdown(f"{type_badge} **{row.type}**  \n{pd.Timestamp(row.date).strftime('%-d %b %Y')}")
-            c2.markdown(f"**{row.route}**  \n`{row.tracking_number}`")
+            c2.markdown(f"**{row.route}**  \n`{row.tracking_number or 'Tracking pending'}`")
             c3.markdown(f"{row.carrier or '—'}  \n`{row.service_code or '—'}`")
             with c4:
                 if cached and cached.get("status"):
