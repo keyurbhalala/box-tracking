@@ -677,76 +677,103 @@ def get_tracking_status(order_id: str = "", tracking_number: str = "") -> dict[s
     }
 
 
+# Sections to explicitly request via the "include" query param on GET /api/orders
+# so per-package tracking numbers are actually returned once an order ships.
+# Per Starshipit's docs, multiple inclusions must be sent as repeated
+# `include=` query params, not one comma-joined value — requests.get() does
+# this automatically when the param value is a list.
+_ORDER_INCLUDE_FIELDS = [
+    "Packages", "Items", "Destination", "Sender_Details",
+    "Shipment_Attributes", "Events", "Metadatas",
+]
+
+
 def _fetch_order_raw(order_id: str) -> tuple[dict, dict]:
     """
-    Hit both Starshipit order-lookup endpoints and return their RAW,
-    unmerged responses: (list_endpoint_order, detail_endpoint_order).
-    Either half is {} if that endpoint returned nothing / errored.
+    Call the ONE real Starshipit order-lookup endpoint — GET /api/orders
+    with an order_id query param — twice: once bare, once with an explicit
+    `include=` list. Returns (bare_order, included_order); either half is
+    {} if that call found nothing.
 
-    Kept separate (rather than merging immediately) so the Diagnostics page
-    can show exactly what each endpoint returns on its own — useful for
-    figuring out which one actually carries per-package tracking numbers.
+    Two bugs used to live here:
+      1. This code used to also call GET /api/orders/{order_id} as a path
+         (i.e. the numeric ID in the URL path). That route doesn't exist on
+         Starshipit's API at all — the ONLY way to fetch a single order is
+         the query-param form below — so that call always 404'd with a
+         generic API-gateway "Resource not found", which we were mistaking
+         for "this order doesn't exist."
+      2. GET /api/orders?order_id=... returns a single object under the key
+         "order" (singular), not a list under "orders" (plural). The old
+         code read `data.get("orders")`, which is always None/empty, so
+         real order data was being silently discarded even when the
+         request succeeded.
+    Both are fixed here. The "bare vs include=" split is kept (rather than
+    a single call) because Starshipit's docs mark Packages/Items/etc. as
+    optional inclusions, so it's not certain a bare order_id lookup always
+    returns the packages array (and therefore the tracking numbers on it).
     """
-    list_order: dict = {}
-    detail_order: dict = {}
+    bare: dict = {}
+    included: dict = {}
 
     try:
         resp = requests.get(
             f"{STARSHIPIT_API_BASE}/orders",
             headers=_headers(),
-            params={"order_id": order_id, "limit": 1},
+            params={"order_id": order_id},
             timeout=30,
         )
         log.info("Starshipit GET orders?order_id=%s [%s]: %.2000s", order_id, resp.status_code, resp.text)
         data = resp.json()
-        orders = data.get("orders") or []
-        if orders and isinstance(orders[0], dict):
-            list_order = orders[0]
+        order = data.get("order")
+        if isinstance(order, dict):
+            bare = order
     except Exception:
-        log.exception("Error fetching order %s via list endpoint", order_id)
+        log.exception("Error fetching order %s (bare)", order_id)
 
     try:
         resp2 = requests.get(
-            f"{STARSHIPIT_API_BASE}/orders/{order_id}",
+            f"{STARSHIPIT_API_BASE}/orders",
             headers=_headers(),
+            params={"order_id": order_id, "include": _ORDER_INCLUDE_FIELDS},
             timeout=30,
         )
-        log.info("Starshipit GET order/%s [%s]: %.2000s", order_id, resp2.status_code, resp2.text)
+        log.info(
+            "Starshipit GET orders?order_id=%s&include=%s [%s]: %.2000s",
+            order_id, _ORDER_INCLUDE_FIELDS, resp2.status_code, resp2.text,
+        )
         data2 = resp2.json()
-        detail = data2.get("order") or data2
-        if isinstance(detail, dict):
-            detail_order = detail
+        order2 = data2.get("order")
+        if isinstance(order2, dict):
+            included = order2
     except Exception:
-        log.exception("Error fetching order %s via detail endpoint", order_id)
+        log.exception("Error fetching order %s (with include=)", order_id)
 
-    return list_order, detail_order
+    return bare, included
 
 
 def get_order_details(order_id: str) -> dict:
     """
-    Fetch a Starshipit order by its numeric order_id.
+    Fetch a Starshipit order by its numeric order_id via GET /api/orders
+    (the only endpoint the API actually offers for single-order lookup —
+    see _fetch_order_raw for the bugs that used to break this).
 
-    Calls BOTH the list endpoint (GET /api/orders?order_id=...) and the
-    single-order endpoint (GET /api/orders/{id}) and merges the results.
-    These two endpoints have been observed returning different shapes on
-    this account — e.g. one may omit per-package tracking numbers that the
-    other includes — so previously only falling back to the second endpoint
-    when the first returned nothing meant we sometimes kept using an
-    incomplete object. Merging means whichever endpoint actually has the
-    tracking data, we'll see it.
+    Calls it twice — bare and with an explicit include=Packages,Items,…
+    list — and merges the two, since it isn't documented whether a bare
+    order_id lookup always returns the packages array. Merging means
+    whichever variant actually has the tracking data, we'll see it.
     """
-    list_order, detail_order = _fetch_order_raw(order_id)
+    bare, included = _fetch_order_raw(order_id)
     merged: dict = {}
-    merged.update(list_order)
-    # Detail endpoint's non-empty values win on key conflicts — it's usually
-    # the more complete response — but anything the list endpoint had that
-    # detail lacks is kept too.
-    for k, v in detail_order.items():
+    merged.update(bare)
+    # The include= call's non-empty values win on key conflicts — it's
+    # requesting strictly more data — but anything bare had that the
+    # include= call lacks is kept too.
+    for k, v in included.items():
         if v not in (None, "", [], {}):
             merged[k] = v
 
     if not merged:
-        return {"error": "Order not found via either endpoint."}
+        return {"error": f"Order {order_id} not found via GET /api/orders (checked bare and with include=)."}
     return merged
 
 
@@ -782,22 +809,23 @@ def find_tracking_number_paths(order: dict) -> list[tuple[str, str]]:
 
 def get_order_details_debug(order_id: str) -> dict:
     """
-    Diagnostics-only: returns the list-endpoint response, the detail-endpoint
-    response, and the merged result side by side, each with its own
-    tracking-number-path scan, so a human can compare the numbers shown here
-    against what NZ Post's tracking site shows for the same order and see
-    exactly which endpoint/path/field is authoritative.
+    Diagnostics-only: returns the bare GET /api/orders?order_id=... response,
+    the same call with include=Packages,Items,… added, and the merged
+    result — side by side, each with its own tracking-number-path scan — so
+    a human can compare the numbers shown here against what NZ Post's
+    tracking site shows for the same order and confirm exactly which
+    call/path/field is authoritative.
     """
-    list_order, detail_order = _fetch_order_raw(order_id)
+    bare, included = _fetch_order_raw(order_id)
     merged = get_order_details(order_id)
     return {
-        "list_endpoint": {
-            "raw": list_order,
-            "tracking_paths": find_tracking_number_paths(list_order),
+        "bare_call": {
+            "raw": bare,
+            "tracking_paths": find_tracking_number_paths(bare),
         },
-        "detail_endpoint": {
-            "raw": detail_order,
-            "tracking_paths": find_tracking_number_paths(detail_order),
+        "include_call": {
+            "raw": included,
+            "tracking_paths": find_tracking_number_paths(included),
         },
         "merged": {
             "raw": merged,

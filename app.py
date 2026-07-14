@@ -1800,7 +1800,7 @@ def render_starshipit_diagnostics() -> None:
     # ── Step 1: Inspect a recent order to see what Starshipit stored ─────────
     st.subheader("Step 1 — Inspect a recent order")
     st.caption(
-        "Pick a recent booking. We'll call `GET /api/orders/{order_id}` and show "
+        "Pick a recent booking. We'll call `GET /api/orders?order_id=…` and show "
         "what `service_code` and `carrier` Starshipit actually stored — "
         "those are the values the label endpoint needs."
     )
@@ -1855,23 +1855,23 @@ def render_starshipit_diagnostics() -> None:
                     if details.get(k) is not None
                 }
                 st.json(key_fields)
-                st.caption("Full response (all fields, list + detail endpoint merged):")
+                st.caption("Full response (all fields, bare + include= calls merged):")
                 st.json(details)
 
-        if c_debug.button("🔍 Deep Debug — compare both endpoints separately"):
+        if c_debug.button("🔍 Deep Debug — compare bare vs. include= calls"):
             st.caption(
                 "Compare the tracking number(s) shown below against what you see for "
                 "this order on the NZ Post tracking site / Starshipit's own order screen. "
                 "Whichever section below actually contains the right number tells us "
                 "exactly which field to read from."
             )
-            with st.spinner("Calling both GET /api/orders?order_id=… and GET /api/orders/{id}…"):
+            with st.spinner("Calling GET /api/orders?order_id=… (bare, then with include=Packages,…)…"):
                 debug = get_order_details_debug(chosen_id)
 
             for section_key, section_title in [
-                ("list_endpoint",   "GET /api/orders?order_id=… (list endpoint)"),
-                ("detail_endpoint", "GET /api/orders/{id} (single-order endpoint)"),
-                ("merged",          "Merged (what the app currently uses)"),
+                ("bare_call",    "GET /api/orders?order_id=… (bare, no include=)"),
+                ("include_call", "GET /api/orders?order_id=…&include=Packages,Items,… "),
+                ("merged",       "Merged (what the app currently uses)"),
             ]:
                 section = debug[section_key]
                 with st.expander(section_title, expanded=bool(section["tracking_paths"])):
