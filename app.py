@@ -1783,7 +1783,9 @@ def render_address_book() -> None:
 
 
 def render_starshipit_diagnostics() -> None:
-    from starshipit import get_order_details, _submit_for_label, list_available_services
+    from starshipit import (
+        get_order_details, get_order_details_debug, _submit_for_label, list_available_services,
+    )
     hero("Starshipit Diagnostics", "Inspect orders and find the correct carrier service code")
 
     # ── Step 0: List all configured carriers and service codes ────────────────
@@ -1805,12 +1807,23 @@ def render_starshipit_diagnostics() -> None:
 
     recent = query_df(
         """
-        SELECT cb.consignment_id, cb.store_name, cb.booking_status, cb.booked_at,
-               s.id as shipment_id
-        FROM courier_bookings cb
-        JOIN shipments s ON s.id = cb.shipment_id
-        WHERE cb.consignment_id IS NOT NULL AND cb.consignment_id != ''
-        ORDER BY cb.booked_at DESC LIMIT 20
+        SELECT consignment_id, label, booked_at, kind FROM (
+            SELECT cb.consignment_id AS consignment_id,
+                   'SHP-' || s.id || ' — ' || cb.store_name AS label,
+                   cb.booked_at AS booked_at,
+                   'Warehouse Shipment' AS kind
+            FROM courier_bookings cb
+            JOIN shipments s ON s.id = cb.shipment_id
+            WHERE cb.consignment_id IS NOT NULL AND cb.consignment_id != ''
+            UNION ALL
+            SELECT st.consignment_id AS consignment_id,
+                   st.source_store_name || ' → ' || st.destination_store_name AS label,
+                   st.booked_at AS booked_at,
+                   'Store Transfer' AS kind
+            FROM store_transfers st
+            WHERE st.consignment_id IS NOT NULL AND st.consignment_id != ''
+        ) x
+        ORDER BY booked_at DESC LIMIT 30
         """
     )
 
@@ -1818,14 +1831,16 @@ def render_starshipit_diagnostics() -> None:
         st.warning("No bookings with Starshipit order IDs found yet.")
     else:
         options = {
-            f"SHP-{row['shipment_id']} — {row['store_name']} (ID: {row['consignment_id']})": row['consignment_id']
+            f"[{row['kind']}] {row['label']} (ID: {row['consignment_id']})": row['consignment_id']
             for _, row in recent.iterrows()
         }
         chosen_label = st.selectbox("Select a booking", list(options))
         chosen_id    = options[chosen_label]
         st.caption(f"Starshipit order_id: **{chosen_id}**")
 
-        if st.button("Fetch Order Details from Starshipit", type="primary"):
+        c_fetch, c_debug = st.columns(2)
+
+        if c_fetch.button("Fetch Order Details from Starshipit", type="primary"):
             with st.spinner("Calling GET /api/orders/…"):
                 details = get_order_details(chosen_id)
             if "error" in details:
@@ -1840,8 +1855,37 @@ def render_starshipit_diagnostics() -> None:
                     if details.get(k) is not None
                 }
                 st.json(key_fields)
-                st.caption("Full response (all fields):")
+                st.caption("Full response (all fields, list + detail endpoint merged):")
                 st.json(details)
+
+        if c_debug.button("🔍 Deep Debug — compare both endpoints separately"):
+            st.caption(
+                "Compare the tracking number(s) shown below against what you see for "
+                "this order on the NZ Post tracking site / Starshipit's own order screen. "
+                "Whichever section below actually contains the right number tells us "
+                "exactly which field to read from."
+            )
+            with st.spinner("Calling both GET /api/orders?order_id=… and GET /api/orders/{id}…"):
+                debug = get_order_details_debug(chosen_id)
+
+            for section_key, section_title in [
+                ("list_endpoint",   "GET /api/orders?order_id=… (list endpoint)"),
+                ("detail_endpoint", "GET /api/orders/{id} (single-order endpoint)"),
+                ("merged",          "Merged (what the app currently uses)"),
+            ]:
+                section = debug[section_key]
+                with st.expander(section_title, expanded=bool(section["tracking_paths"])):
+                    if section["tracking_paths"]:
+                        st.success(f"Found {len(section['tracking_paths'])} 'tracking'-named field(s):")
+                        st.table(
+                            pd.DataFrame(
+                                section["tracking_paths"], columns=["JSON path", "Value"]
+                            )
+                        )
+                    else:
+                        st.warning("No key containing 'tracking' found anywhere in this response.")
+                    st.caption("Full raw response:")
+                    st.json(section["raw"] or {"(empty)": True})
 
     # ── Step 2: Test label endpoint ───────────────────────────────────────────
     st.divider()
@@ -2606,7 +2650,7 @@ def _render_pin_screen() -> None:
 if "pin_role" not in st.session_state:
     # Session got reset (idle tab, WiFi drop, sleep) — if the browser still has
     # a valid, unexpired unlock token in the URL, restore the login instead of
-    # forcing a re-entry. See _make_auth_token / _verify_auth_token above.
+    # forcing a re-entry. See _make_auth_token / _remember_hours above.
     _token = st.query_params.get("auth")
     _restored_role = _verify_auth_token(_token) if _token else None
     if _restored_role:

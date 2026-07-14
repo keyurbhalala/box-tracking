@@ -677,20 +677,18 @@ def get_tracking_status(order_id: str = "", tracking_number: str = "") -> dict[s
     }
 
 
-def get_order_details(order_id: str) -> dict:
+def _fetch_order_raw(order_id: str) -> tuple[dict, dict]:
     """
-    Fetch a Starshipit order by its numeric order_id.
+    Hit both Starshipit order-lookup endpoints and return their RAW,
+    unmerged responses: (list_endpoint_order, detail_endpoint_order).
+    Either half is {} if that endpoint returned nothing / errored.
 
-    Calls BOTH the list endpoint (GET /api/orders?order_id=...) and the
-    single-order endpoint (GET /api/orders/{id}) and merges the results.
-    These two endpoints have been observed returning different shapes on
-    this account — e.g. one may omit per-package tracking numbers that the
-    other includes — so previously only falling back to the second endpoint
-    when the first returned nothing meant we sometimes kept using an
-    incomplete object. Merging means whichever endpoint actually has the
-    tracking data, we'll see it.
+    Kept separate (rather than merging immediately) so the Diagnostics page
+    can show exactly what each endpoint returns on its own — useful for
+    figuring out which one actually carries per-package tracking numbers.
     """
-    merged: dict = {}
+    list_order: dict = {}
+    detail_order: dict = {}
 
     try:
         resp = requests.get(
@@ -703,7 +701,7 @@ def get_order_details(order_id: str) -> dict:
         data = resp.json()
         orders = data.get("orders") or []
         if orders and isinstance(orders[0], dict):
-            merged.update(orders[0])
+            list_order = orders[0]
     except Exception:
         log.exception("Error fetching order %s via list endpoint", order_id)
 
@@ -717,18 +715,95 @@ def get_order_details(order_id: str) -> dict:
         data2 = resp2.json()
         detail = data2.get("order") or data2
         if isinstance(detail, dict):
-            # Detail endpoint's non-empty values win on key conflicts — it's
-            # usually the more complete response — but anything the list
-            # endpoint had that detail lacks is kept too.
-            for k, v in detail.items():
-                if v not in (None, "", [], {}):
-                    merged[k] = v
+            detail_order = detail
     except Exception:
         log.exception("Error fetching order %s via detail endpoint", order_id)
+
+    return list_order, detail_order
+
+
+def get_order_details(order_id: str) -> dict:
+    """
+    Fetch a Starshipit order by its numeric order_id.
+
+    Calls BOTH the list endpoint (GET /api/orders?order_id=...) and the
+    single-order endpoint (GET /api/orders/{id}) and merges the results.
+    These two endpoints have been observed returning different shapes on
+    this account — e.g. one may omit per-package tracking numbers that the
+    other includes — so previously only falling back to the second endpoint
+    when the first returned nothing meant we sometimes kept using an
+    incomplete object. Merging means whichever endpoint actually has the
+    tracking data, we'll see it.
+    """
+    list_order, detail_order = _fetch_order_raw(order_id)
+    merged: dict = {}
+    merged.update(list_order)
+    # Detail endpoint's non-empty values win on key conflicts — it's usually
+    # the more complete response — but anything the list endpoint had that
+    # detail lacks is kept too.
+    for k, v in detail_order.items():
+        if v not in (None, "", [], {}):
+            merged[k] = v
 
     if not merged:
         return {"error": "Order not found via either endpoint."}
     return merged
+
+
+def _deep_collect_tracking_paths(obj: Any, path: str, found: list[tuple[str, str]]) -> None:
+    """
+    Like _deep_collect_tracking_numbers, but records the exact JSON path
+    (e.g. "packages[1].tracking_number") for every match instead of just the
+    value — used by the Diagnostics page so it's unambiguous exactly where a
+    tracking number was found.
+    """
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = k.lower()
+            new_path = f"{path}.{k}" if path else k
+            if "tracking" in lk and not any(bad in lk for bad in _TRACKING_KEY_EXCLUDE):
+                if isinstance(v, str) and v.strip():
+                    found.append((new_path, v.strip()))
+                elif isinstance(v, (int, float)) and v:
+                    found.append((new_path, str(v)))
+            _deep_collect_tracking_paths(v, new_path, found)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            _deep_collect_tracking_paths(item, f"{path}[{i}]", found)
+
+
+def find_tracking_number_paths(order: dict) -> list[tuple[str, str]]:
+    """Public helper for the Diagnostics page: [(json_path, value), ...] for
+    every key containing 'tracking' found anywhere in the order dict."""
+    found: list[tuple[str, str]] = []
+    _deep_collect_tracking_paths(order, "", found)
+    return found
+
+
+def get_order_details_debug(order_id: str) -> dict:
+    """
+    Diagnostics-only: returns the list-endpoint response, the detail-endpoint
+    response, and the merged result side by side, each with its own
+    tracking-number-path scan, so a human can compare the numbers shown here
+    against what NZ Post's tracking site shows for the same order and see
+    exactly which endpoint/path/field is authoritative.
+    """
+    list_order, detail_order = _fetch_order_raw(order_id)
+    merged = get_order_details(order_id)
+    return {
+        "list_endpoint": {
+            "raw": list_order,
+            "tracking_paths": find_tracking_number_paths(list_order),
+        },
+        "detail_endpoint": {
+            "raw": detail_order,
+            "tracking_paths": find_tracking_number_paths(detail_order),
+        },
+        "merged": {
+            "raw": merged,
+            "tracking_paths": find_tracking_number_paths(merged),
+        },
+    }
 
 
 def list_available_services() -> list[dict]:
