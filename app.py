@@ -42,6 +42,7 @@ from services import (
     get_stores,
     get_store_mappings,
     get_store_mapping,
+    get_store_transfers,
     get_store_with_address,
     get_unmapped_stores,
     get_warehouse,
@@ -52,6 +53,7 @@ from services import (
     retry_courier_booking,
     save_courier_booking,
     save_signature,
+    save_store_transfer,
     set_store_mapping,
     trend_data,
     update_address_book_entry,
@@ -1847,7 +1849,6 @@ def render_starshipit_diagnostics() -> None:
         "above. When this returns a label PDF, that code is correct — update "
         "`SERVICE_OPTIONS` in `starshipit.py` accordingly."
     )
-
     d_col1, d_col2 = st.columns(2)
     test_order_id = d_col1.text_input("Starshipit order_id (numeric)", value=chosen_id if not recent.empty else "")
     test_svc_code = d_col2.selectbox(
@@ -1868,12 +1869,254 @@ def render_starshipit_diagnostics() -> None:
             st.caption("Try a different code from the dropdown.")
 
 
+# ── Store-to-store courier transfer presets ──────────────────────────────────
+# A4 / A5 bags are booked as a fixed-size flat-rate satchel — no per-shipment
+# dimension entry from the user. Tune these to match the actual satchel stock
+# in the warehouse; they only affect the live Starshipit quote & booking
+# package size, not what's physically packed.
+BAG_PRESETS: dict[str, dict[str, float]] = {
+    "A4 Bag": {"weight": 1.0, "length": 33.0, "width": 24.0, "height": 6.0},
+    "A5 Bag": {"weight": 0.5, "length": 24.0, "width": 17.0, "height": 5.0},
+}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _quote_transfer(
+    source_store_id: int,
+    destination_store_id: int,
+    weight: float,
+    length: float,
+    width: float,
+    height: float,
+) -> tuple[list[dict], str]:
+    """
+    Cached live Starshipit quote between two stores for a package of the
+    given size. Cached briefly (120s) so reruns triggered by unrelated
+    widgets (e.g. typing in Notes) don't refire the live API call.
+    """
+    from starshipit import Address, Package, get_delivery_quote
+
+    source = get_store_with_address(source_store_id)
+    destination = get_store_with_address(destination_store_id)
+    if not source or not source.get("street") or not destination or not destination.get("street"):
+        return [], "Missing address mapping."
+
+    def _addr(row: dict) -> "Address":
+        return Address(
+            name=row.get("contact_name") or row.get("company_name") or "",
+            company=row.get("company_name") or "",
+            phone=row.get("phone") or "",
+            street=row.get("street") or "",
+            suburb=row.get("suburb") or "",
+            city=row.get("city") or "",
+            postcode=row.get("postcode") or "",
+            country=row.get("country_code") or "NZ",
+            email=row.get("email") or "",
+            building=row.get("building") or "",
+        )
+
+    pkg = Package(boxes=1, weight_per_box=weight, length=length, width=width, height=height)
+    return get_delivery_quote(_addr(source), _addr(destination), pkg)
+
+
+def _address_from_store_row(row: dict, fallback_name: str):
+    from starshipit import Address
+    return Address(
+        name=row.get("contact_name") or row.get("company_name") or fallback_name,
+        company=row.get("company_name") or fallback_name,
+        phone=row.get("phone") or "",
+        street=row.get("street") or "",
+        suburb=row.get("suburb") or "",
+        city=row.get("city") or "",
+        postcode=row.get("postcode") or "",
+        country=row.get("country_code") or "NZ",
+        email=row.get("email") or "",
+        building=row.get("building") or "",
+    )
+
+
+def render_store_transfer() -> None:
+    hero("Store Transfer", "Book a courier between two stores")
+
+    # ── Post-booking result screen ────────────────────────────────────────────
+    if "_transfer_result" in st.session_state:
+        state = st.session_state.pop("_transfer_result")
+        if state["success"]:
+            st.success(state["message"])
+            if state.get("label_pdf"):
+                _auto_print_labels([(state["label_pdf"], state["ref"])])
+            elif state.get("label_error"):
+                st.warning(f"⚠️ Label PDF not returned by Starshipit: {state['label_error']}")
+        else:
+            st.error(state["message"])
+        if st.button("➕ Book Another Transfer", type="primary", width='stretch'):
+            st.rerun()
+        return
+
+    stores = get_stores()
+    if len(stores) < 2:
+        st.warning("Add at least two active stores before booking a transfer.")
+        return
+    store_map = dict(zip(stores["store_name"], stores["id"]))
+
+    col_src, col_dst = st.columns(2)
+    source_name = col_src.selectbox("Source Store", list(store_map), key="xfer_source")
+    dest_options = [s for s in store_map if s != source_name]
+    dest_name = col_dst.selectbox("Destination Store", dest_options, key="xfer_dest")
+
+    source_id = int(store_map[source_name])
+    dest_id = int(store_map[dest_name])
+
+    source_addr = get_store_with_address(source_id)
+    dest_addr = get_store_with_address(dest_id)
+
+    missing = [
+        name for name, addr in ((source_name, source_addr), (dest_name, dest_addr))
+        if not addr or not addr.get("street")
+    ]
+    if missing:
+        st.warning(
+            f"**{', '.join(missing)}** has no Address Book mapping. "
+            "Go to Admin → Address Book to map this store before booking a transfer."
+        )
+        return
+
+    from starshipit import SERVICE_OPTIONS
+
+    with st.container(border=True):
+        svc_label = st.selectbox("NZ Post Service", list(SERVICE_OPTIONS.keys()), key="xfer_service")
+        service_code = SERVICE_OPTIONS[svc_label]
+
+    transfer_date = st.date_input("Transfer Date", value=_today_nz(), key="xfer_date")
+
+    courier_type = st.radio(
+        "Courier Type", ["Box", "A4 Bag", "A5 Bag"], horizontal=True, key="xfer_type",
+    )
+
+    if courier_type == "Box":
+        st.markdown("#### 📦 Box Dimensions")
+        d1, d2, d3, d4 = st.columns(4)
+        weight = d1.number_input(
+            "Wt (kg)", min_value=0.1, max_value=50.0, value=1.0, step=0.1,
+            format="%.1f", key="xfer_weight",
+        )
+        length = d2.number_input(
+            "L (cm)", min_value=1, max_value=300, value=30, step=1, key="xfer_length",
+        )
+        width = d3.number_input(
+            "W (cm)", min_value=1, max_value=300, value=20, step=1, key="xfer_width",
+        )
+        height = d4.number_input(
+            "H (cm)", min_value=1, max_value=300, value=15, step=1, key="xfer_height",
+        )
+    else:
+        preset = BAG_PRESETS[courier_type]
+        weight, length, width, height = (
+            preset["weight"], preset["length"], preset["width"], preset["height"],
+        )
+        st.caption(
+            f"📨 {courier_type} — flat-rate satchel "
+            f"({length:.0f}×{width:.0f}×{height:.0f} cm, up to {weight:.1f} kg)."
+        )
+
+    notes = st.text_area("Notes", placeholder="Optional reference or instructions", key="xfer_notes")
+
+    # ── Live estimated cost — refetches whenever the inputs above change ─────
+    st.markdown("---")
+    cost_left, cost_right = st.columns([3, 1])
+    with st.spinner("Getting live quote from Starshipit…"):
+        quote_services, quote_error = _quote_transfer(
+            source_id, dest_id, float(weight), float(length), float(width), float(height),
+        )
+    selected_quote = next(
+        (q for q in quote_services if q["service_code"] == service_code), None
+    )
+    if selected_quote:
+        estimated_cost = selected_quote["price"]
+        cost_right.metric("Estimated Cost", f"${estimated_cost:,.2f}")
+    elif quote_services:
+        cheapest = quote_services[0]
+        estimated_cost = cheapest["price"]
+        cost_right.metric(
+            "Estimated Cost", f"${estimated_cost:,.2f}",
+            help=(
+                f"No live quote for {svc_label} — showing cheapest available "
+                f"service ({cheapest['service_name']})."
+            ),
+        )
+    else:
+        estimated_cost = None
+        cost_right.metric("Estimated Cost", "—")
+    with cost_left:
+        st.caption(
+            "Live quote from Starshipit, based on the two store addresses and "
+            "package size above."
+        )
+        if quote_error and not quote_services:
+            st.caption(f"⚠️ {quote_error}")
+    if quote_services:
+        with st.expander("See all available service quotes"):
+            st.dataframe(
+                pd.DataFrame(quote_services).rename(
+                    columns={"service_code": "Code", "service_name": "Service", "price": "Price ($)"}
+                ),
+                hide_index=True, width='stretch',
+            )
+
+    st.markdown("---")
+    book = st.button(
+        "🚚 Book Courier", type="primary", width='stretch', key="xfer_book",
+    )
+
+    if book:
+        from starshipit import create_order, Package
+
+        sender = _address_from_store_row(source_addr, source_name)
+        recipient = _address_from_store_row(dest_addr, dest_name)
+        pkg = Package(
+            boxes=1, weight_per_box=float(weight),
+            length=float(length), width=float(width), height=float(height),
+        )
+        ref = f"XFER-{source_id}-{dest_id}-{int(time.time())}"
+
+        with st.spinner("Booking with Starshipit…"):
+            result = create_order(sender, recipient, pkg, ref, service_code)
+
+        save_store_transfer(
+            transfer_date, source_id, source_name, dest_id, dest_name,
+            courier_type, float(weight), float(length), float(width), float(height),
+            service_code, estimated_cost, notes, result,
+        )
+
+        if result.success:
+            msg = (
+                f"**{source_name} → {dest_name}** booked — {courier_type}. "
+                f"Tracking: **{result.tracking_number or '—'}**."
+            )
+            if estimated_cost is not None:
+                msg += f"  Estimated cost: **${estimated_cost:,.2f}**."
+            st.session_state["_transfer_result"] = {
+                "success": True,
+                "message": msg,
+                "label_pdf": result.label_pdf,
+                "label_error": result.label_error,
+                "ref": f"{source_name} to {dest_name}",
+            }
+        else:
+            st.session_state["_transfer_result"] = {
+                "success": False,
+                "message": f"Booking failed: {result.error or 'Unknown error'}",
+            }
+        st.rerun()
+
+
 PAGES = {
     "Dashboard": render_dashboard,
     "New Shipment": render_new_shipment,
     "Delivery Run": render_delivery_run,
     "History & Edit":             render_history,
     "Store Lookup": render_store_lookup,
+    "Store Transfer": render_store_transfer,
     "Group Reporting": render_group_reporting,
     "Pallet Search": render_pallet_search,
     "Groups & Stores": render_store_management,
@@ -2204,4 +2447,3 @@ with st.sidebar:
     st.caption("Data stored in Supabase and backed by an audit trail.")
 
 visible_pages[page]()
-

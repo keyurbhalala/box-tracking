@@ -397,6 +397,136 @@ def create_order(
         )
 
 
+def _rate_address(addr: Address) -> dict[str, Any]:
+    """Format an Address for the /api/rates and /api/deliveryservices endpoints."""
+    pc = str(addr.postcode).strip()
+    if pc.endswith(".0"):
+        pc = pc[:-2]
+    d: dict[str, Any] = {
+        "street":       addr.street,
+        "city":         addr.city,
+        "post_code":    pc,
+        "country_code": addr.country or "NZ",
+    }
+    if addr.suburb:
+        d["suburb"] = addr.suburb
+    return d
+
+
+def get_delivery_quote(
+    sender: Address,
+    destination: Address,
+    package: Package,
+    currency: str = "NZD",
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Fetch live courier price quotes between two addresses.
+
+    Tries POST /api/deliveryservices first — it returns available delivery
+    services regardless of whether "checkout rates" are configured on this
+    Starshipit account. Falls back to POST /api/rates (checkout rates) if
+    that returns nothing.
+
+    Returns (services, error):
+      services — list of {"service_code", "service_name", "price"} dicts,
+                 cheapest first.
+      error    — human-readable message if no live quote could be fetched
+                 (services will be [] in that case).
+    """
+    packages = _build_packages_list(package)
+    body: dict[str, Any] = {
+        "sender":      _rate_address(sender),
+        "destination": _rate_address(destination),
+        "packages":    packages,
+    }
+
+    def _extract(data: dict[str, Any]) -> list[dict[str, Any]]:
+        items = (
+            data.get("delivery_services")
+            or data.get("services")
+            or data.get("rates")
+            or []
+        )
+        out: list[dict[str, Any]] = []
+        for it in items:
+            code = it.get("carrier_service_code") or it.get("service_code") or ""
+            name = (
+                it.get("carrier_service_name")
+                or it.get("service_name")
+                or it.get("carrier_name")
+                or code
+            )
+            price = it.get("total_price", it.get("price"))
+            if price is None:
+                continue
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                continue
+            out.append({"service_code": code, "service_name": name, "price": price})
+        out.sort(key=lambda x: x["price"])
+        return out
+
+    last_error = ""
+
+    # ── 1. Delivery services — works without checkout-rates configuration ────
+    try:
+        resp = requests.post(
+            f"{STARSHIPIT_API_BASE}/deliveryservices",
+            headers=_headers(),
+            json={**body, "include_pricing": True},
+            timeout=20,
+        )
+        log.info("Starshipit POST /deliveryservices [%s]: %.1500s", resp.status_code, resp.text)
+        data = resp.json()
+        services = _extract(data)
+        if services:
+            return services, ""
+        if not data.get("success", True):
+            errors = data.get("errors") or []
+            last_error = (
+                "; ".join(e.get("description", str(e)) for e in errors)
+                if errors else data.get("message", "")
+            )
+    except requests.exceptions.Timeout:
+        last_error = "Delivery services request timed out"
+    except RuntimeError as exc:
+        # Credentials not configured — no point trying the fallback either.
+        return [], str(exc)
+    except Exception as exc:
+        log.exception("Error calling /api/deliveryservices")
+        last_error = str(exc)
+
+    # ── 2. Fall back to checkout rates ────────────────────────────────────────
+    try:
+        resp = requests.post(
+            f"{STARSHIPIT_API_BASE}/rates",
+            headers=_headers(),
+            json={**body, "currency": currency},
+            timeout=20,
+        )
+        log.info("Starshipit POST /rates [%s]: %.1500s", resp.status_code, resp.text)
+        data = resp.json()
+        services = _extract(data)
+        if services:
+            return services, ""
+        if not data.get("success", True):
+            errors = data.get("errors") or []
+            last_error = (
+                "; ".join(e.get("description", str(e)) for e in errors)
+                if errors else data.get("message", last_error)
+            )
+        elif not last_error:
+            last_error = "No live rates returned — check courier & rates setup in Starshipit."
+    except requests.exceptions.Timeout:
+        last_error = last_error or "Rates request timed out"
+    except Exception as exc:
+        log.exception("Error calling /api/rates")
+        last_error = last_error or str(exc)
+
+    return [], last_error or "Unable to fetch a live quote."
+
+
 def tracking_url(tracking_number: str) -> str:
     """Return NZ Post tracking URL for a given tracking number."""
     return NZ_POST_TRACKING_URL.format(tracking_number)

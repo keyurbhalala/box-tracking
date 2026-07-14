@@ -1065,6 +1065,90 @@ def get_courier_bookings(shipment_id: int) -> pd.DataFrame:
     )
 
 
+# ---------------------------------------------------------------------------
+# Store-to-store courier transfers
+# ---------------------------------------------------------------------------
+
+
+def save_store_transfer(
+    transfer_date: date,
+    source_store_id: int,
+    source_store_name: str,
+    destination_store_id: int,
+    destination_store_name: str,
+    courier_type: str,
+    weight: float,
+    length: float,
+    width: float,
+    height: float,
+    service_code: str,
+    estimated_cost: float | None,
+    notes: str,
+    result: Any,  # starshipit.BookingResult
+) -> int:
+    """
+    Persist a store-to-store courier transfer booking to store_transfers.
+    Returns the new row id.
+    """
+    with connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO store_transfers
+                (transfer_date, source_store_id, source_store_name,
+                 destination_store_id, destination_store_name, courier_type,
+                 weight, length, width, height, service_code, estimated_cost,
+                 notes, tracking_number, label_url, consignment_id, carrier,
+                 booking_status, booked_at, api_response, api_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                transfer_date.isoformat(), source_store_id, source_store_name,
+                destination_store_id, destination_store_name, courier_type,
+                weight, length, width, height, service_code, estimated_cost,
+                (notes or "").strip() or None,
+                result.tracking_number or None,
+                result.label_url or None,
+                result.consignment_id or None,
+                result.carrier or None,
+                result.booking_status,
+                result.booked_at or None,
+                (result.api_response or "")[:10_000] or None,
+                (result.error or "")[:2_000] or None,
+            ),
+        ).fetchone()
+        transfer_id = row["id"]
+        audit(
+            conn, "store_transfer", transfer_id, "CREATE",
+            new_values={
+                "source": source_store_name,
+                "destination": destination_store_name,
+                "courier_type": courier_type,
+                "status": result.booking_status,
+                "tracking": result.tracking_number,
+                "estimated_cost": estimated_cost,
+            },
+        )
+    return transfer_id
+
+
+def get_store_transfers(limit: int = 50) -> pd.DataFrame:
+    """Return the most recent store-to-store transfers, newest first."""
+    return query_df(
+        """
+        SELECT id, transfer_date AS "Date",
+               source_store_name AS "From", destination_store_name AS "To",
+               courier_type AS "Type", weight AS "Wt (kg)",
+               estimated_cost AS "Est. Cost", tracking_number AS "Tracking",
+               carrier AS "Carrier", booking_status AS "Status",
+               booked_at AS "Booked At"
+        FROM store_transfers
+        ORDER BY id DESC LIMIT ?
+        """,
+        (limit,),
+    )
+
+
 def audit_history(limit: int = 500) -> pd.DataFrame:
     return query_df(
         """

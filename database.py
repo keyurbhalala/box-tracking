@@ -233,6 +233,44 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS idx_courier_shipment ON courier_bookings(shipment_id)",
     "CREATE INDEX IF NOT EXISTS idx_courier_store    ON courier_bookings(store_id)",
 
+    # ── Store-to-store courier transfers (peer bookings, not ex-warehouse) ────
+    # Kept separate from courier_bookings because transfers aren't tied to a
+    # shipment record — they're a direct store → store booking with their own
+    # live-quoted estimated cost.
+    """
+    CREATE TABLE IF NOT EXISTS store_transfers (
+        id                      SERIAL PRIMARY KEY,
+        transfer_date           TEXT NOT NULL,
+        source_store_id         INTEGER,
+        source_store_name       TEXT NOT NULL,
+        destination_store_id    INTEGER,
+        destination_store_name  TEXT NOT NULL,
+        courier_type            TEXT NOT NULL
+                                    CHECK (courier_type IN ('Box', 'A4 Bag', 'A5 Bag')),
+        weight                  REAL,
+        length                  REAL,
+        width                   REAL,
+        height                  REAL,
+        service_code            TEXT,
+        estimated_cost          REAL,
+        notes                   TEXT,
+        tracking_number         TEXT,
+        label_url               TEXT,
+        consignment_id          TEXT,
+        carrier                 TEXT,
+        booking_status          TEXT NOT NULL DEFAULT 'Pending',
+        booked_at               TEXT,
+        api_response            TEXT,
+        api_error               TEXT,
+        created_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (source_store_id)      REFERENCES stores(id) ON DELETE SET NULL,
+        FOREIGN KEY (destination_store_id) REFERENCES stores(id) ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_transfers_date   ON store_transfers(transfer_date)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_source ON store_transfers(source_store_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transfers_dest   ON store_transfers(destination_store_id)",
+
     # ── Address Book — single source of truth for all delivery addresses ──────
     """
     CREATE TABLE IF NOT EXISTS address_book (
