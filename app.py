@@ -33,6 +33,7 @@ from services import (
     delete_shipment,
     delete_store,
     delete_store_mapping,
+    get_active_bookings,
     get_address_book,
     get_courier_bookings,
     get_delivery_details,
@@ -2140,6 +2141,110 @@ def render_store_transfer() -> None:
         st.rerun()
 
 
+# ── Live Tracking ──────────────────────────────────────────────────────────
+# Compact per-row status bar for recent courier bookings (both flows).
+# Live status is only fetched from Starshipit when the admin clicks Refresh —
+# never on every page load, since there can be hundreds of recent bookings.
+
+_TRACKING_STAGE_LABELS = ["Booked", "Dispatched", "In Transit", "Out for Delivery", "Delivered"]
+
+_TRACKING_BADGE_STATUSES: dict[str, str] = {
+    "Exception":          "🔴 Exception",
+    "Cancelled":          "⚫ Cancelled",
+    "AttemptedDelivery":  "🟠 Attempted Delivery",
+    "AwaitingCollection": "🟣 Awaiting Collection",
+    "PickupInStore":      "🟣 Ready for Pickup",
+}
+
+
+def _status_bar_html(tracking_status: str) -> str:
+    """Return a compact 5-stage HTML progress bar + label for one tracking status."""
+    from starshipit import TRACKING_STAGES
+
+    status = (tracking_status or "").strip()
+
+    if status in _TRACKING_BADGE_STATUSES:
+        return (
+            f'<div style="font-size:13px;font-weight:600">'
+            f'{_TRACKING_BADGE_STATUSES[status]}</div>'
+        )
+    if status.startswith("Return") or status in ("DroppedOff", "Manifested"):
+        return f'<div style="font-size:13px;color:#a855f7;font-weight:600">↩ {status}</div>'
+
+    try:
+        stage = TRACKING_STAGES.index(status) + 1  # 1-based
+    except ValueError:
+        stage = 1 if status else 0  # 0 = not yet scanned by the carrier
+
+    segments = "".join(
+        f'<div style="flex:1;height:6px;border-radius:3px;'
+        f'background:{"#0f766e" if i < stage else "rgba(128,128,128,0.25)"}"></div>'
+        for i in range(5)
+    )
+    bar = f'<div style="display:flex;gap:3px;margin-bottom:3px">{segments}</div>'
+    label = _TRACKING_STAGE_LABELS[stage - 1] if stage >= 1 else "Awaiting carrier scan"
+    return bar + f'<div style="font-size:12px;color:#888">{label}</div>'
+
+
+def render_live_tracking() -> None:
+    hero("Live Tracking", "Status of recent courier bookings — warehouse shipments and store transfers")
+
+    bookings = get_active_bookings(days_back=30)
+    if bookings.empty:
+        st.info("No booked couriers with tracking numbers in the last 30 days.")
+        return
+
+    col1, col2 = st.columns([1, 4])
+    refresh = col1.button("🔄 Refresh live status", type="primary", width='stretch', key="tracking_refresh")
+    col2.caption(
+        f"{len(bookings)} booking{'s' if len(bookings) != 1 else ''} in the last 30 days. "
+        "Live status is fetched from Starshipit only when you click Refresh."
+    )
+
+    cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
+
+    if refresh:
+        from starshipit import get_tracking_status
+        progress = st.progress(0, text="Checking live status…")
+        total = len(bookings)
+        for i, row in enumerate(bookings.itertuples()):
+            cache[row.consignment_id] = get_tracking_status(
+                order_id=str(row.consignment_id or ""),
+                tracking_number=str(row.tracking_number or ""),
+            )
+            progress.progress((i + 1) / total, text=f"Checked {row.route}…")
+        progress.empty()
+        st.session_state["_tracking_status_cache"] = cache
+        st.session_state["_tracking_last_refresh"] = datetime.now().strftime("%H:%M:%S")
+
+    if st.session_state.get("_tracking_last_refresh"):
+        st.caption(f"Last refreshed at {st.session_state['_tracking_last_refresh']}")
+
+    from starshipit import tracking_url
+
+    st.markdown("---")
+    for row in bookings.itertuples():
+        cached = cache.get(row.consignment_id)
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
+            type_badge = "🏬" if row.type == "Warehouse Shipment" else "🔁"
+            c1.markdown(f"{type_badge} **{row.type}**  \n{pd.Timestamp(row.date).strftime('%-d %b %Y')}")
+            c2.markdown(f"**{row.route}**  \n`{row.tracking_number}`")
+            c3.markdown(f"{row.carrier or '—'}  \n`{row.service_code or '—'}`")
+            with c4:
+                if cached and cached.get("status"):
+                    st.markdown(_status_bar_html(cached["status"]), unsafe_allow_html=True)
+                elif cached and cached.get("error"):
+                    st.caption(f"⚠️ {cached['error'][:80]}")
+                else:
+                    st.caption("Click Refresh for live status")
+                if row.tracking_number:
+                    st.link_button(
+                        "📦 Track", tracking_url(str(row.tracking_number)),
+                        width='stretch', key=f"track_{row.type}_{row.id}",
+                    )
+
+
 PAGES = {
     "Dashboard": render_dashboard,
     "New Shipment": render_new_shipment,
@@ -2147,6 +2252,7 @@ PAGES = {
     "History & Edit":             render_history,
     "Store Lookup": render_store_lookup,
     "Store Transfer": render_store_transfer,
+    "Live Tracking": render_live_tracking,
     "Group Reporting": render_group_reporting,
     "Pallet Search": render_pallet_search,
     "Groups & Stores": render_store_management,

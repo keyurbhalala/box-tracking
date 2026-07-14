@@ -1149,6 +1149,62 @@ def get_store_transfers(limit: int = 50) -> pd.DataFrame:
     )
 
 
+def get_active_bookings(days_back: int = 30) -> pd.DataFrame:
+    """
+    Recent, successfully-booked couriers with a tracking number, combined
+    from both booking flows (warehouse -> store shipments, and store <->
+    store transfers), newest first. Powers the Live Tracking page.
+    """
+    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+
+    warehouse = query_df(
+        """
+        SELECT
+            cb.id                AS id,
+            'Warehouse Shipment' AS type,
+            s.shipment_date      AS date,
+            ('→ ' || cb.store_name) AS route,
+            cb.tracking_number   AS tracking_number,
+            cb.carrier           AS carrier,
+            cb.service_code      AS service_code,
+            cb.consignment_id    AS consignment_id,
+            cb.booking_status    AS booking_status
+        FROM courier_bookings cb
+        JOIN shipments s ON s.id = cb.shipment_id
+        WHERE cb.booking_status = 'Booked'
+          AND cb.tracking_number IS NOT NULL AND cb.tracking_number != ''
+          AND s.shipment_date >= ?
+        """,
+        (cutoff,),
+    )
+
+    transfers = query_df(
+        """
+        SELECT
+            id                   AS id,
+            'Store Transfer'     AS type,
+            transfer_date        AS date,
+            (source_store_name || ' → ' || destination_store_name) AS route,
+            tracking_number      AS tracking_number,
+            carrier              AS carrier,
+            service_code         AS service_code,
+            consignment_id       AS consignment_id,
+            booking_status       AS booking_status
+        FROM store_transfers
+        WHERE booking_status = 'Booked'
+          AND tracking_number IS NOT NULL AND tracking_number != ''
+          AND transfer_date >= ?
+        """,
+        (cutoff,),
+    )
+
+    combined = pd.concat([warehouse, transfers], ignore_index=True)
+    if combined.empty:
+        return combined
+    combined["date"] = pd.to_datetime(combined["date"])
+    return combined.sort_values("date", ascending=False).reset_index(drop=True)
+
+
 def audit_history(limit: int = 500) -> pd.DataFrame:
     return query_df(
         """

@@ -532,6 +532,81 @@ def tracking_url(tracking_number: str) -> str:
     return NZ_POST_TRACKING_URL.format(tracking_number)
 
 
+# Every status Starshipit's tracking feed can return. The five "main" ones
+# are used to draw the progress bar on the Live Tracking page; the rest are
+# shown as a standalone badge instead (see app.py _status_bar_html).
+TRACKING_STAGES: list[str] = ["Printed", "Dispatched", "InTransit", "OutForDelivery", "Delivered"]
+
+
+def get_tracking_status(order_id: str = "", tracking_number: str = "") -> dict[str, Any]:
+    """
+    GET /api/track — poll live carrier tracking status for one order.
+
+    Pass whichever identifier is available; order_id is tried first when
+    both are supplied. Never raises — on failure returns {"status": "",
+    "error": "..."} so the caller can show a per-row warning instead of
+    crashing the whole tracking page.
+    """
+    params: dict[str, Any] = {}
+    if order_id:
+        params["order_id"] = order_id
+    if tracking_number:
+        params["tracking_number"] = tracking_number
+    if not params:
+        return {"status": "", "error": "No order_id or tracking_number supplied."}
+
+    try:
+        resp = requests.get(
+            f"{STARSHIPIT_API_BASE}/track",
+            headers=_headers(),
+            params=params,
+            timeout=15,
+        )
+        log.info("Starshipit GET /track %s [%s]: %.1000s", params, resp.status_code, resp.text)
+        data = resp.json()
+    except requests.exceptions.Timeout:
+        return {"status": "", "error": "Tracking request timed out"}
+    except RuntimeError as exc:
+        return {"status": "", "error": str(exc)}
+    except Exception as exc:
+        log.exception("Error calling /api/track for %s", params)
+        return {"status": "", "error": str(exc)}
+
+    # This account's exact /api/track response shape isn't fully verified,
+    # so unwrap defensively: try a bare top-level record first, then common
+    # wrapper keys used elsewhere in the Starshipit API (result/results/tracking).
+    record: dict[str, Any] = data
+    for key in ("result", "tracking", "results"):
+        val = data.get(key)
+        if isinstance(val, dict):
+            record = val
+            break
+        if isinstance(val, list) and val:
+            record = val[0]
+            break
+
+    status = (
+        record.get("tracking_status")
+        or record.get("status")
+        or record.get("order_status")
+        or ""
+    )
+    if not status and not data.get("success", True):
+        errors = data.get("errors") or []
+        err_msg = (
+            "; ".join(e.get("description", str(e)) for e in errors)
+            if errors else data.get("message", "No tracking status returned.")
+        )
+        return {"status": "", "error": err_msg}
+
+    return {
+        "status": status,
+        "last_updated": record.get("last_updated_date") or record.get("last_updated") or "",
+        "carrier_name": record.get("carrier_name") or "",
+        "carrier_service": record.get("carrier_service") or "",
+    }
+
+
 def get_order_details(order_id: str) -> dict:
     """
     Fetch a Starshipit order by its numeric order_id.
