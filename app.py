@@ -2202,8 +2202,14 @@ def _refresh_one_booking(row) -> None:
     Important: Starshipit's /api/track endpoint rejects requests that only
     supply order_id with "Please specify tracking_number" — so we must NOT
     call it until we actually have a tracking number.
+
+    A single order can contain multiple packages (multi-box store shipments
+    create one package per box), and each package can get its own NZ Post
+    tracking number — not always just one. update_tracking_number() saves
+    all of them, comma-separated, but the live /api/track status check below
+    only ever uses the first, since that endpoint expects a single number.
     """
-    from starshipit import get_tracking_status, get_order_details
+    from starshipit import get_tracking_status, get_order_details, _extract_tracking_numbers
 
     cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
     last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
@@ -2213,11 +2219,7 @@ def _refresh_one_booking(row) -> None:
     if not tracking_num and row.consignment_id:
         try:
             details = get_order_details(str(row.consignment_id))
-            pkgs = details.get("packages") or []
-            found = (
-                (pkgs[0].get("tracking_number", "") if pkgs else "")
-                or details.get("tracking_number", "")
-            )
+            found = _extract_tracking_numbers(details)
             if found:
                 update_tracking_number(row.type, int(row.id), found)
                 tracking_num = found
@@ -2226,10 +2228,12 @@ def _refresh_one_booking(row) -> None:
                 "Could not recover tracking number for %s row id=%s", row.type, row.id
             )
 
-    if tracking_num:
+    first_tracking = tracking_num.split(",")[0].strip() if tracking_num else ""
+
+    if first_tracking:
         cache[row.consignment_id] = get_tracking_status(
             order_id=str(row.consignment_id or ""),
-            tracking_number=tracking_num,
+            tracking_number=first_tracking,
         )
     else:
         cache[row.consignment_id] = {
@@ -2279,8 +2283,12 @@ def render_live_tracking() -> None:
                 if last_checked.get(row.consignment_id):
                     st.caption(f"Checked {last_checked[row.consignment_id]}")
                 if row.tracking_number:
+                    # tracking_number can be a comma-joined list when an
+                    # order has multiple packages (one per box) — the
+                    # tracking link only needs the first one.
+                    first_num = str(row.tracking_number).split(",")[0].strip()
                     st.link_button(
-                        "📦 Track", tracking_url(str(row.tracking_number)),
+                        "📦 Track", tracking_url(first_num),
                         width='stretch', key=f"track_{row.type}_{row.id}",
                     )
             with c5:
