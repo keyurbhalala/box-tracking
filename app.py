@@ -61,6 +61,7 @@ from services import (
     update_group,
     update_shipment,
     update_store,
+    update_tracking_number,
 )
 
 
@@ -2204,18 +2205,42 @@ def render_live_tracking() -> None:
     cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
 
     if refresh:
-        from starshipit import get_tracking_status
+        from starshipit import get_tracking_status, get_order_details
         progress = st.progress(0, text="Checking live status…")
         total = len(bookings)
+        recovered_any = False
         for i, row in enumerate(bookings.itertuples()):
             cache[row.consignment_id] = get_tracking_status(
                 order_id=str(row.consignment_id or ""),
                 tracking_number=str(row.tracking_number or ""),
             )
+            # If this row still has no tracking number, Starshipit may have
+            # allocated one since booking. Look it up once and save it to the
+            # database so it's there for good — no more "Tracking pending"
+            # on future loads, and no need to re-fetch it again next time.
+            if not row.tracking_number and row.consignment_id:
+                try:
+                    details = get_order_details(str(row.consignment_id))
+                    pkgs = details.get("packages") or []
+                    found = (
+                        (pkgs[0].get("tracking_number", "") if pkgs else "")
+                        or details.get("tracking_number", "")
+                    )
+                    if found:
+                        update_tracking_number(row.type, int(row.id), found)
+                        recovered_any = True
+                except Exception:
+                    log.exception(
+                        "Could not recover tracking number for %s row id=%s", row.type, row.id
+                    )
             progress.progress((i + 1) / total, text=f"Checked {row.route}…")
         progress.empty()
         st.session_state["_tracking_status_cache"] = cache
         st.session_state["_tracking_last_refresh"] = datetime.now().strftime("%H:%M:%S")
+        if recovered_any:
+            # Re-query so the newly-saved tracking numbers render immediately
+            # in the loop below, instead of waiting for the next page load.
+            bookings = get_active_bookings(days_back=30)
 
     if st.session_state.get("_tracking_last_refresh"):
         st.caption(f"Last refreshed at {st.session_state['_tracking_last_refresh']}")
@@ -2552,7 +2577,7 @@ def _render_pin_screen() -> None:
 if "pin_role" not in st.session_state:
     # Session got reset (idle tab, WiFi drop, sleep) — if the browser still has
     # a valid, unexpired unlock token in the URL, restore the login instead of
-    # forcing a re-entry. See _make_auth_token / _remember_hours above.
+    # forcing a re-entry. See _make_auth_token / _verify_auth_token above.
     _token = st.query_params.get("auth")
     _restored_role = _verify_auth_token(_token) if _token else None
     if _restored_role:
