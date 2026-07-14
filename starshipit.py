@@ -684,7 +684,7 @@ def get_tracking_status(order_id: str = "", tracking_number: str = "") -> dict[s
 # this automatically when the param value is a list.
 _ORDER_INCLUDE_FIELDS = [
     "Packages", "Items", "Destination", "Sender_Details",
-    "Shipment_Attributes", "Events", "Metadatas",
+    "Shipment_Attributes", "Events", "Metadatas", "Shipping_Price",
 ]
 
 
@@ -805,6 +805,43 @@ def find_tracking_number_paths(order: dict) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     _deep_collect_tracking_paths(order, "", found)
     return found
+
+
+def get_shipping_price_breakdown(order: dict) -> dict:
+    """
+    Pull the shipping-cost fields off an order payload — the same numbers
+    shown under "Shipping Rate Breakdown" on the Starshipit order screen.
+
+    Per the Full Order Model docs, these only come back when the order was
+    fetched with include=Shipping_Price (now part of _ORDER_INCLUDE_FIELDS,
+    so get_order_details() always requests it). Returns {} if none of these
+    fields are present on this order (e.g. this account doesn't have
+    checkout pricing configured, or the order predates that setup).
+    """
+    if not order:
+        return {}
+
+    out: dict = {}
+
+    total = order.get("total_shipping_price")
+    if total not in (None, ""):
+        out["total_shipping_price"] = total
+    currency = order.get("total_shipping_currency")
+    if currency:
+        out["total_shipping_currency"] = currency
+
+    for k in ("duties_amount", "tax_amount", "shipping_freight_value", "custom_margin_value"):
+        v = order.get(k)
+        if v not in (None, "", 0):
+            out[k] = v
+
+    # "Unstructured shipping price data" per Starshipit's docs — shape isn't
+    # documented further, so it's passed through as-is for display.
+    breakdown = order.get("price_breakdown")
+    if breakdown:
+        out["price_breakdown"] = breakdown
+
+    return out
 
 
 def get_order_details_debug(order_id: str) -> dict:

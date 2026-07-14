@@ -2243,6 +2243,11 @@ def _refresh_one_booking(row) -> None:
     allocate one until after booking) and persists it via
     update_tracking_number() so it's saved for good.
 
+    Also fetches the Starshipit shipping cost (get_shipping_price_breakdown)
+    every time — /api/track doesn't return pricing, only GET /api/orders
+    does, so this always calls get_order_details() now (previously it was
+    skipped once a tracking number was already known).
+
     Important: Starshipit's /api/track endpoint rejects requests that only
     supply order_id with "Please specify tracking_number" — so we must NOT
     call it until we actually have a tracking number.
@@ -2253,23 +2258,29 @@ def _refresh_one_booking(row) -> None:
     all of them, comma-separated, but the live /api/track status check below
     only ever uses the first, since that endpoint expects a single number.
     """
-    from starshipit import get_tracking_status, get_order_details, _extract_tracking_numbers
+    from starshipit import (
+        get_tracking_status, get_order_details, _extract_tracking_numbers,
+        get_shipping_price_breakdown,
+    )
 
     cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
     last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
+    price_cache: dict = st.session_state.setdefault("_tracking_price_cache", {})
 
     tracking_num = str(row.tracking_number or "")
 
-    if not tracking_num and row.consignment_id:
+    if row.consignment_id:
         try:
             details = get_order_details(str(row.consignment_id))
-            found = _extract_tracking_numbers(details)
-            if found:
-                update_tracking_number(row.type, int(row.id), found)
-                tracking_num = found
+            if not tracking_num:
+                found = _extract_tracking_numbers(details)
+                if found:
+                    update_tracking_number(row.type, int(row.id), found)
+                    tracking_num = found
+            price_cache[row.consignment_id] = get_shipping_price_breakdown(details)
         except Exception:
             log.exception(
-                "Could not recover tracking number for %s row id=%s", row.type, row.id
+                "Could not fetch order details for %s row id=%s", row.type, row.id
             )
 
     first_tracking = tracking_num.split(",")[0].strip() if tracking_num else ""
@@ -2288,6 +2299,7 @@ def _refresh_one_booking(row) -> None:
     last_checked[row.consignment_id] = datetime.now().strftime("%H:%M:%S")
     st.session_state["_tracking_status_cache"] = cache
     st.session_state["_tracking_last_checked"] = last_checked
+    st.session_state["_tracking_price_cache"] = price_cache
 
 
 def render_live_tracking() -> None:
@@ -2305,12 +2317,14 @@ def render_live_tracking() -> None:
 
     cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
     last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
+    price_cache: dict = st.session_state.setdefault("_tracking_price_cache", {})
 
     from starshipit import tracking_url
 
     st.markdown("---")
     for row in bookings.itertuples():
         cached = cache.get(row.consignment_id)
+        price = price_cache.get(row.consignment_id)
         with st.container(border=True):
             c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 2, 1])
             type_badge = "🏬" if row.type == "Warehouse Shipment" else "🔁"
@@ -2342,6 +2356,23 @@ def render_live_tracking() -> None:
                         _refresh_one_booking(row)
                     st.rerun()
 
+            # ── Shipping Rate Breakdown — only populated after 🔄 is clicked,
+            # since /api/track doesn't carry pricing (only GET /api/orders
+            # does). Hidden entirely if this order has no price data at all
+            # (e.g. account has no checkout pricing configured).
+            if price and price.get("total_shipping_price") is not None:
+                currency = price.get("total_shipping_currency", "NZD")
+                with st.expander(
+                    f"💰 Shipping Rate Breakdown — ${price['total_shipping_price']:,.2f} {currency}",
+                    expanded=False,
+                ):
+                    extra = {k: v for k, v in price.items()
+                             if k not in ("total_shipping_price", "total_shipping_currency")}
+                    if extra:
+                        st.json(extra)
+                    else:
+                        st.caption("No further breakdown returned by Starshipit for this order.")
+
 
 PAGES = {
     "Dashboard": render_dashboard,
@@ -2366,6 +2397,7 @@ GENERAL_PAGES = [
     "Delivery Run",
     "History & Edit",
     "Store Lookup",
+    "Live Tracking",
 ]
 
 
