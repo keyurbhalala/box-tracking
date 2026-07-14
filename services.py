@@ -1149,6 +1149,35 @@ def get_store_transfers(limit: int = 50) -> pd.DataFrame:
     )
 
 
+def update_tracking_number(booking_type: str, row_id: int, tracking_number: str) -> None:
+    """
+    Persist a tracking number that was recovered *after* the initial booking
+    — e.g. when Starshipit hadn't allocated one yet at booking time, and the
+    Live Tracking page's "Refresh" button discovers it later via a fresh
+    order lookup. Writing it back here means it's stored for good: the next
+    page load (for any user) already has it, with no repeat API call needed.
+
+    `booking_type` is the same "Warehouse Shipment" / "Store Transfer" label
+    produced by get_active_bookings(), used to pick the right table.
+    Only fills in a currently-empty tracking_number — never overwrites one
+    that's already set.
+    """
+    table = "courier_bookings" if booking_type == "Warehouse Shipment" else "store_transfers"
+    with connection() as conn:
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET tracking_number = ?
+            WHERE id = ? AND (tracking_number IS NULL OR tracking_number = '')
+            """,
+            (tracking_number, row_id),
+        )
+        audit(
+            conn, "courier_booking" if table == "courier_bookings" else "store_transfer",
+            row_id, "UPDATE", new_values={"tracking_number": tracking_number},
+        )
+
+
 def get_active_bookings(days_back: int = 30) -> pd.DataFrame:
     """
     Recent, successfully-booked couriers, combined from both booking flows
