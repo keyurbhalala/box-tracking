@@ -608,22 +608,32 @@ def tracking_url(tracking_number: str) -> str:
 TRACKING_STAGES: list[str] = ["Printed", "Dispatched", "InTransit", "OutForDelivery", "Delivered"]
 
 
-def get_tracking_status(order_id: str = "", tracking_number: str = "") -> dict[str, Any]:
+def get_tracking_status(tracking_number: str = "", order_number: str = "") -> dict[str, Any]:
     """
-    GET /api/track — poll live carrier tracking status for one order.
+    GET /api/track — poll live carrier tracking status for one shipment.
 
-    Pass whichever identifier is available; order_id is tried first when
-    both are supplied. Never raises — on failure returns {"status": "",
-    "error": "..."} so the caller can show a per-row warning instead of
-    crashing the whole tracking page.
+    Per Starshipit's official docs, this endpoint only accepts two params:
+    `tracking_number` (the carrier's tracking number) and `order_number`
+    (the source-system order reference — NOT the numeric Starshipit
+    order_id). A previous version of this code was sending `order_id`,
+    which isn't a real parameter for /api/track at all — the endpoint
+    likely just ignored it, and the "Unable to find tracking number" errors
+    seen in practice are the carrier genuinely not having that tracking
+    number in its system yet (typically because the shipment hasn't been
+    manifested/handed over to the carrier in Starshipit yet — Starshipit's
+    own "Dispatched" status just means a label was generated, which can
+    happen before the physical manifest).
+
+    Never raises — on failure returns {"status": "", "error": "..."} so the
+    caller can show a per-row warning instead of crashing the whole page.
     """
     params: dict[str, Any] = {}
-    if order_id:
-        params["order_id"] = order_id
     if tracking_number:
         params["tracking_number"] = tracking_number
+    if order_number:
+        params["order_number"] = order_number
     if not params:
-        return {"status": "", "error": "No order_id or tracking_number supplied."}
+        return {"status": "", "error": "No tracking_number or order_number supplied."}
 
     try:
         resp = requests.get(

@@ -2286,10 +2286,7 @@ def _refresh_one_booking(row) -> None:
     first_tracking = tracking_num.split(",")[0].strip() if tracking_num else ""
 
     if first_tracking:
-        cache[row.consignment_id] = get_tracking_status(
-            order_id=str(row.consignment_id or ""),
-            tracking_number=first_tracking,
-        )
+        cache[row.consignment_id] = get_tracking_status(tracking_number=first_tracking)
     else:
         cache[row.consignment_id] = {
             "status": "",
@@ -2335,7 +2332,16 @@ def render_live_tracking() -> None:
                 if cached and cached.get("status"):
                     st.markdown(_status_bar_html(cached["status"]), unsafe_allow_html=True)
                 elif cached and cached.get("error"):
-                    st.caption(f"⚠️ {cached['error'][:80]}")
+                    err = cached["error"]
+                    st.caption(f"⚠️ {err[:80]}")
+                    if "unable to find tracking number" in err.lower():
+                        # The carrier (not our app) genuinely has no record of
+                        # this tracking number yet — Starshipit's "Dispatched"
+                        # status just means a label was generated, which can
+                        # happen before the parcel is physically manifested /
+                        # handed over to NZ Post. Once manifested, this should
+                        # start resolving on the next 🔄.
+                        st.caption("Likely not yet manifested with NZ Post — try again after manifesting.")
                 else:
                     st.caption("Not checked yet")
                 if last_checked.get(row.consignment_id):
