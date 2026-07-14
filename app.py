@@ -2268,6 +2268,7 @@ def _refresh_one_booking(row) -> None:
     price_cache: dict = st.session_state.setdefault("_tracking_price_cache", {})
 
     tracking_num = str(row.tracking_number or "")
+    order_number = ""
 
     if row.consignment_id:
         try:
@@ -2278,6 +2279,8 @@ def _refresh_one_booking(row) -> None:
                     update_tracking_number(row.type, int(row.id), found)
                     tracking_num = found
             price_cache[row.consignment_id] = get_shipping_price_breakdown(details)
+            if isinstance(details, dict):
+                order_number = str(details.get("order_number") or "")
         except Exception:
             log.exception(
                 "Could not fetch order details for %s row id=%s", row.type, row.id
@@ -2286,7 +2289,24 @@ def _refresh_one_booking(row) -> None:
     first_tracking = tracking_num.split(",")[0].strip() if tracking_num else ""
 
     if first_tracking:
-        cache[row.consignment_id] = get_tracking_status(tracking_number=first_tracking)
+        result = get_tracking_status(tracking_number=first_tracking)
+        # Multi-package orders (one tracking number per box) have been
+        # observed where a single package's tracking_number 404s against
+        # /api/track — "Unable to find tracking number" — even though the
+        # carrier's OWN tracking page shows full history for that exact
+        # number. Likely Starshipit indexes each package as a separate
+        # internal "child" record and this endpoint only recognizes some of
+        # them. Falling back to a lookup by order_number (the whole order's
+        # reference, which Starshipit definitely has) sidesteps that.
+        if (
+            result.get("error")
+            and "unable to find tracking number" in result["error"].lower()
+            and order_number
+        ):
+            fallback = get_tracking_status(order_number=order_number)
+            if fallback.get("status") or not fallback.get("error"):
+                result = fallback
+        cache[row.consignment_id] = result
     else:
         cache[row.consignment_id] = {
             "status": "",
@@ -2333,15 +2353,18 @@ def render_live_tracking() -> None:
                     st.markdown(_status_bar_html(cached["status"]), unsafe_allow_html=True)
                 elif cached and cached.get("error"):
                     err = cached["error"]
-                    st.caption(f"⚠️ {err[:80]}")
+                    # Show the full message — an earlier 80-char cutoff here
+                    # was slicing tracking numbers mid-digit, which looked
+                    # like the number itself was wrong when it wasn't.
+                    st.caption(f"⚠️ {err}")
                     if "unable to find tracking number" in err.lower():
-                        # The carrier (not our app) genuinely has no record of
-                        # this tracking number yet — Starshipit's "Dispatched"
-                        # status just means a label was generated, which can
-                        # happen before the parcel is physically manifested /
-                        # handed over to NZ Post. Once manifested, this should
-                        # start resolving on the next 🔄.
-                        st.caption("Likely not yet manifested with NZ Post — try again after manifesting.")
+                        # _refresh_one_booking() already retries this exact
+                        # case via an order_number lookup before giving up,
+                        # so seeing this means both that package-level
+                        # tracking_number AND the order-level order_number
+                        # lookup failed — most likely the carrier genuinely
+                        # hasn't manifested/scanned this parcel yet.
+                        st.caption("Retried by order number too — carrier likely hasn't manifested/scanned this yet.")
                 else:
                     st.caption("Not checked yet")
                 if last_checked.get(row.consignment_id):
