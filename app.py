@@ -1879,6 +1879,16 @@ BAG_PRESETS: dict[str, dict[str, float]] = {
     "A5 Bag": {"weight": 0.5, "length": 24.0, "width": 17.0, "height": 5.0},
 }
 
+# Fixed NZ Post / Starshipit product codes for the flat-rate bag types — these
+# come straight from this account's live courier setup (see "See all
+# available service quotes" on the Store Transfer page, e.g. CPOLTPA4 /
+# CPOLTPA5). Swap to the *B suffix (CPOLTPA4B / CPOLTPA5B) if you want the
+# bubble-lined bag booked by default instead.
+BAG_SERVICE_CODES: dict[str, str] = {
+    "A4 Bag": "CPOLTPA4",
+    "A5 Bag": "CPOLTPA5",
+}
+
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _quote_transfer(
@@ -1981,12 +1991,6 @@ def render_store_transfer() -> None:
         )
         return
 
-    from starshipit import SERVICE_OPTIONS
-
-    with st.container(border=True):
-        svc_label = st.selectbox("NZ Post Service", list(SERVICE_OPTIONS.keys()), key="xfer_service")
-        service_code = SERVICE_OPTIONS[svc_label]
-
     transfer_date = st.date_input("Transfer Date", value=_today_nz(), key="xfer_date")
 
     courier_type = st.radio(
@@ -2021,39 +2025,65 @@ def render_store_transfer() -> None:
 
     notes = st.text_area("Notes", placeholder="Optional reference or instructions", key="xfer_notes")
 
-    # ── Live estimated cost — refetches whenever the inputs above change ─────
+    # ── Live quote — fetched once per (stores, package) combo, then used both
+    # to price the page and to pick the actual service_code. No separate
+    # "NZ Post Service" dropdown: Box picks from whatever Starshipit actually
+    # quotes for that size; A4/A5 Bag always book the matching NZ Post bag
+    # product (falling back to the cheapest live option if this account
+    # doesn't have that exact code enabled).
     st.markdown("---")
-    cost_left, cost_right = st.columns([3, 1])
     with st.spinner("Getting live quote from Starshipit…"):
         quote_services, quote_error = _quote_transfer(
             source_id, dest_id, float(weight), float(length), float(width), float(height),
         )
-    selected_quote = next(
-        (q for q in quote_services if q["service_code"] == service_code), None
-    )
-    if selected_quote:
-        estimated_cost = selected_quote["price"]
-        cost_right.metric("Estimated Cost", f"${estimated_cost:,.2f}")
-    elif quote_services:
-        cheapest = quote_services[0]
-        estimated_cost = cheapest["price"]
-        cost_right.metric(
-            "Estimated Cost", f"${estimated_cost:,.2f}",
-            help=(
-                f"No live quote for {svc_label} — showing cheapest available "
-                f"service ({cheapest['service_name']})."
-            ),
-        )
+
+    cost_left, cost_right = st.columns([3, 1])
+
+    if courier_type == "Box":
+        if quote_services:
+            svc_options = {
+                f"{q['service_name']} — ${q['price']:,.2f}": q for q in quote_services
+            }
+            with cost_left:
+                chosen_label = st.selectbox(
+                    "Service", list(svc_options), index=0, key="xfer_service_box",
+                )
+            chosen = svc_options[chosen_label]
+            service_code = chosen["service_code"]
+            estimated_cost = chosen["price"]
+        else:
+            from starshipit import DEFAULT_SERVICE_CODE
+            service_code = DEFAULT_SERVICE_CODE
+            estimated_cost = None
+            with cost_left:
+                st.caption(f"⚠️ {quote_error or 'No live services available.'}")
     else:
-        estimated_cost = None
-        cost_right.metric("Estimated Cost", "—")
-    with cost_left:
-        st.caption(
-            "Live quote from Starshipit, based on the two store addresses and "
-            "package size above."
-        )
-        if quote_error and not quote_services:
-            st.caption(f"⚠️ {quote_error}")
+        service_code = BAG_SERVICE_CODES[courier_type]
+        matched = next((q for q in quote_services if q["service_code"] == service_code), None)
+        if matched:
+            estimated_cost = matched["price"]
+            with cost_left:
+                st.caption(f"Service: **{matched['service_name']}** (`{service_code}`)")
+        elif quote_services:
+            cheapest = quote_services[0]
+            service_code = cheapest["service_code"]
+            estimated_cost = cheapest["price"]
+            with cost_left:
+                st.caption(
+                    f"`{BAG_SERVICE_CODES[courier_type]}` isn't available on this "
+                    f"account — using the cheapest live option instead: "
+                    f"**{cheapest['service_name']}**."
+                )
+        else:
+            estimated_cost = None
+            with cost_left:
+                st.caption(f"⚠️ {quote_error or 'No live services available.'}")
+
+    cost_right.metric(
+        "Estimated Cost",
+        f"${estimated_cost:,.2f}" if estimated_cost is not None else "—",
+    )
+
     if quote_services:
         with st.expander("See all available service quotes"):
             st.dataframe(
