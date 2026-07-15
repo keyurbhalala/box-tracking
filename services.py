@@ -977,7 +977,10 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
         return False, "Warehouse settings not found in database."
 
     sender = Address(
-        name=warehouse.get("warehouse_name", "Shosha Warehouse"),
+        # Name = contact person (Keyur), Company = business name — matches
+        # the same fix applied to the main booking flow in app.py.
+        name=warehouse.get("contact_name", "Keyur"),
+        company=warehouse.get("warehouse_name", "Shosha Warehouse"),
         phone=warehouse.get("phone", ""),
         street=warehouse.get("address_line1", ""),
         suburb=warehouse.get("suburb", ""),

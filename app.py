@@ -292,7 +292,12 @@ def _build_courier_stores(
         return []
 
     sender = Address(
-        name=warehouse.get("warehouse_name", "Shosha Warehouse"),
+        # "Name" is the contact person Starshipit/the courier shows for the
+        # sender; "Company" is the business name. Previously this sent the
+        # warehouse name as the Name (leaving Company blank) — now Name is
+        # the contact person (Keyur) and Company is "Shosha Warehouse".
+        name=warehouse.get("contact_name", "Keyur"),
+        company=warehouse.get("warehouse_name", "Shosha Warehouse"),
         phone=warehouse.get("phone", ""),
         street=warehouse.get("address_line1", ""),
         suburb=warehouse.get("suburb", ""),
