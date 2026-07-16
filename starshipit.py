@@ -120,6 +120,16 @@ class Package:
     # one entry per physical box.  When set, each box is sent as a separate
     # package line in the Starshipit payload so dimensions differ per box.
     per_box_dims: "list[dict] | None" = None
+    # Starshipit's Full Package Model has a "packaging_type" field with
+    # documented accepted values Carton, Box, Envelope, Item, Jiffy, Pallet,
+    # Satchel, Skid, Bag — every package we book was previously sent with
+    # this field omitted entirely, so Starshipit had no way to know an A4/A5
+    # courier bag isn't a box; it just showed up as a generic "Package".
+    # Defaults to "Carton" since most bookings are real warehouse boxes.
+    packaging_type: str = "Carton"
+    # Optional display name for the package (Starshipit shows this instead
+    # of the generic "Package"/"Package2" — e.g. "A4 Bag").
+    name: str = ""
 
 
 @dataclass
@@ -169,7 +179,7 @@ def _cm_to_m(val: float) -> float:
 def _build_packages_list(package: Package) -> list[dict[str, Any]]:
     """
     Build the packages list used by both POST /api/orders and POST /api/orders/shipment.
-    Each entry: {weight (kg), length/width/height (m), quantity}.
+    Each entry: {weight (kg), length/width/height (m), quantity, packaging_type, name}.
     """
     if package.per_box_dims:
         return [
@@ -179,20 +189,23 @@ def _build_packages_list(package: Package) -> list[dict[str, Any]]:
                 "width":    _cm_to_m(float(d.get("width")  or 20.0)),
                 "height":   _cm_to_m(float(d.get("height") or 15.0)),
                 "quantity": 1,
+                "packaging_type": package.packaging_type,
             }
             for d in package.per_box_dims
         ]
     else:
         total_weight = round(package.weight_per_box * package.boxes, 3)
-        return [
-            {
-                "weight":   total_weight,
-                "length":   _cm_to_m(package.length),
-                "width":    _cm_to_m(package.width),
-                "height":   _cm_to_m(package.height),
-                "quantity": package.boxes,
-            }
-        ]
+        entry: dict[str, Any] = {
+            "weight":   total_weight,
+            "length":   _cm_to_m(package.length),
+            "width":    _cm_to_m(package.width),
+            "height":   _cm_to_m(package.height),
+            "quantity": package.boxes,
+            "packaging_type": package.packaging_type,
+        }
+        if package.name:
+            entry["name"] = package.name
+        return [entry]
 
 
 def _build_payload(

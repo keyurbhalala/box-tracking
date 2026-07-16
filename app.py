@@ -1949,6 +1949,8 @@ def _quote_transfer(
     length: float,
     width: float,
     height: float,
+    packaging_type: str = "Carton",
+    name: str = "",
 ) -> tuple[list[dict], str]:
     """
     Cached live Starshipit quote between two stores for a package of the
@@ -1976,7 +1978,10 @@ def _quote_transfer(
             building=row.get("building") or "",
         )
 
-    pkg = Package(boxes=1, weight_per_box=weight, length=length, width=width, height=height)
+    pkg = Package(
+        boxes=1, weight_per_box=weight, length=length, width=width, height=height,
+        packaging_type=packaging_type, name=name,
+    )
     return get_delivery_quote(_addr(source), _addr(destination), pkg)
 
 
@@ -2082,10 +2087,18 @@ def render_store_transfer() -> None:
     # quotes for that size; A4/A5 Bag always book the matching NZ Post bag
     # product (falling back to the cheapest live option if this account
     # doesn't have that exact code enabled).
+    # A4/A5 Bag are flat-rate NZ Post satchels, not boxes — tag them as such
+    # (packaging_type="Bag") so Starshipit records and displays them
+    # correctly (e.g. "A4 Bag" instead of a generic "Package"), matching
+    # how a manually-created Courier Pack order looks in Starshipit's UI.
+    pkg_type = "Carton" if courier_type == "Box" else "Bag"
+    pkg_name = "" if courier_type == "Box" else courier_type
+
     st.markdown("---")
     with st.spinner("Getting live quote from Starshipit…"):
         quote_services, quote_error = _quote_transfer(
             source_id, dest_id, float(weight), float(length), float(width), float(height),
+            packaging_type=pkg_type, name=pkg_name,
         )
 
     cost_left, cost_right = st.columns([3, 1])
@@ -2157,6 +2170,7 @@ def render_store_transfer() -> None:
         pkg = Package(
             boxes=1, weight_per_box=float(weight),
             length=float(length), width=float(width), height=float(height),
+            packaging_type=pkg_type, name=pkg_name,
         )
         ref = f"XFER-{source_id}-{dest_id}-{int(time.time())}"
 
