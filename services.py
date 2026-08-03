@@ -977,10 +977,7 @@ def retry_courier_booking(booking_id: int) -> tuple[bool, str]:
         return False, "Warehouse settings not found in database."
 
     sender = Address(
-        # Name = contact person (Keyur), Company = business name — matches
-        # the same fix applied to the main booking flow in app.py.
-        name=warehouse.get("contact_name", "Keyur"),
-        company=warehouse.get("warehouse_name", "Shosha Warehouse"),
+        name=warehouse.get("warehouse_name", "Shosha Warehouse"),
         phone=warehouse.get("phone", ""),
         street=warehouse.get("address_line1", ""),
         suburb=warehouse.get("suburb", ""),
@@ -1059,186 +1056,13 @@ def get_courier_bookings(shipment_id: int) -> pd.DataFrame:
         SELECT id, store_name, boxes,
                tracking_number, label_url, carrier,
                service_code, booking_status, booked_at,
-               api_error, retry_count, consignment_id
+               api_error, retry_count,               consignment_id
         FROM courier_bookings
         WHERE shipment_id = ?
         ORDER BY store_name
         """,
         (shipment_id,),
     )
-
-
-# ---------------------------------------------------------------------------
-# Store-to-store courier transfers
-# ---------------------------------------------------------------------------
-
-
-def save_store_transfer(
-    transfer_date: date,
-    source_store_id: int,
-    source_store_name: str,
-    destination_store_id: int,
-    destination_store_name: str,
-    courier_type: str,
-    weight: float,
-    length: float,
-    width: float,
-    height: float,
-    service_code: str,
-    estimated_cost: float | None,
-    notes: str,
-    result: Any,  # starshipit.BookingResult
-) -> int:
-    """
-    Persist a store-to-store courier transfer booking to store_transfers.
-    Returns the new row id.
-    """
-    with connection() as conn:
-        row = conn.execute(
-            """
-            INSERT INTO store_transfers
-                (transfer_date, source_store_id, source_store_name,
-                 destination_store_id, destination_store_name, courier_type,
-                 weight, length, width, height, service_code, estimated_cost,
-                 notes, tracking_number, label_url, consignment_id, carrier,
-                 booking_status, booked_at, api_response, api_error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-            """,
-            (
-                transfer_date.isoformat(), source_store_id, source_store_name,
-                destination_store_id, destination_store_name, courier_type,
-                weight, length, width, height, service_code, estimated_cost,
-                (notes or "").strip() or None,
-                result.tracking_number or None,
-                result.label_url or None,
-                result.consignment_id or None,
-                result.carrier or None,
-                result.booking_status,
-                result.booked_at or None,
-                (result.api_response or "")[:10_000] or None,
-                (result.error or "")[:2_000] or None,
-            ),
-        ).fetchone()
-        transfer_id = row["id"]
-        audit(
-            conn, "store_transfer", transfer_id, "CREATE",
-            new_values={
-                "source": source_store_name,
-                "destination": destination_store_name,
-                "courier_type": courier_type,
-                "status": result.booking_status,
-                "tracking": result.tracking_number,
-                "estimated_cost": estimated_cost,
-            },
-        )
-    return transfer_id
-
-
-def get_store_transfers(limit: int = 50) -> pd.DataFrame:
-    """Return the most recent store-to-store transfers, newest first."""
-    return query_df(
-        """
-        SELECT id, transfer_date AS "Date",
-               source_store_name AS "From", destination_store_name AS "To",
-               courier_type AS "Type", weight AS "Wt (kg)",
-               estimated_cost AS "Est. Cost", tracking_number AS "Tracking",
-               carrier AS "Carrier", booking_status AS "Status",
-               booked_at AS "Booked At"
-        FROM store_transfers
-        ORDER BY id DESC LIMIT ?
-        """,
-        (limit,),
-    )
-
-
-def update_tracking_number(booking_type: str, row_id: int, tracking_number: str) -> None:
-    """
-    Persist a tracking number that was recovered *after* the initial booking
-    — e.g. when Starshipit hadn't allocated one yet at booking time, and the
-    Live Tracking page's "Refresh" button discovers it later via a fresh
-    order lookup. Writing it back here means it's stored for good: the next
-    page load (for any user) already has it, with no repeat API call needed.
-
-    `booking_type` is the same "Warehouse Shipment" / "Store Transfer" label
-    produced by get_active_bookings(), used to pick the right table.
-    Only fills in a currently-empty tracking_number — never overwrites one
-    that's already set.
-    """
-    table = "courier_bookings" if booking_type == "Warehouse Shipment" else "store_transfers"
-    with connection() as conn:
-        conn.execute(
-            f"""
-            UPDATE {table}
-            SET tracking_number = ?
-            WHERE id = ? AND (tracking_number IS NULL OR tracking_number = '')
-            """,
-            (tracking_number, row_id),
-        )
-        audit(
-            conn, "courier_booking" if table == "courier_bookings" else "store_transfer",
-            row_id, "UPDATE", new_values={"tracking_number": tracking_number},
-        )
-
-
-def get_active_bookings(days_back: int = 30) -> pd.DataFrame:
-    """
-    Recent, successfully-booked couriers, combined from both booking flows
-    (warehouse -> store shipments, and store <-> store transfers), newest
-    first. Powers the Live Tracking page.
-
-    Deliberately does NOT require a tracking_number — some carriers/accounts
-    don't allocate one until the order is actually submitted for shipment,
-    so a booking can be 'Booked' with tracking_number briefly empty. Hiding
-    those rows made just-booked couriers invisible on this page. The UI
-    shows "Tracking pending" for rows where it's still empty.
-    """
-    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
-
-    warehouse = query_df(
-        """
-        SELECT
-            cb.id                AS id,
-            'Warehouse Shipment' AS type,
-            s.shipment_date      AS date,
-            ('→ ' || cb.store_name) AS route,
-            cb.tracking_number   AS tracking_number,
-            cb.carrier           AS carrier,
-            cb.service_code      AS service_code,
-            cb.consignment_id    AS consignment_id,
-            cb.booking_status    AS booking_status
-        FROM courier_bookings cb
-        JOIN shipments s ON s.id = cb.shipment_id
-        WHERE cb.booking_status = 'Booked'
-          AND s.shipment_date >= ?
-        """,
-        (cutoff,),
-    )
-
-    transfers = query_df(
-        """
-        SELECT
-            id                   AS id,
-            'Store Transfer'     AS type,
-            transfer_date        AS date,
-            (source_store_name || ' → ' || destination_store_name) AS route,
-            tracking_number      AS tracking_number,
-            carrier              AS carrier,
-            service_code         AS service_code,
-            consignment_id       AS consignment_id,
-            booking_status       AS booking_status
-        FROM store_transfers
-        WHERE booking_status = 'Booked'
-          AND transfer_date >= ?
-        """,
-        (cutoff,),
-    )
-
-    combined = pd.concat([warehouse, transfers], ignore_index=True)
-    if combined.empty:
-        return combined
-    combined["date"] = pd.to_datetime(combined["date"])
-    return combined.sort_values("date", ascending=False).reset_index(drop=True)
 
 
 def audit_history(limit: int = 500) -> pd.DataFrame:
@@ -1252,4 +1076,164 @@ def audit_history(limit: int = 500) -> pd.DataFrame:
         ORDER BY id DESC LIMIT ?
         """,
         (limit,),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mainfreight / Pallet booking
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=60)
+def get_pallet_stores() -> pd.DataFrame:
+    """
+    All pallet address book entries ordered by name.
+    Cached 60 s — cleared when the pallet address book changes.
+    """
+    return query_df(
+        """
+        SELECT code, name, city, state_code,
+               contact_name, contact_phone, contact_email,
+               delivery_instructions, pickup_from_depot,
+               notification_email1, notification_events1,
+               notification_email2, notification_events2
+        FROM pallet_address_book
+        ORDER BY LOWER(name)
+        """
+    )
+
+
+def get_pallet_store(code: str) -> "dict[str, Any] | None":
+    """Return a single pallet_address_book row as a dict, or None."""
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM pallet_address_book WHERE code = ?",
+            (code,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def _clear_pallet_store_cache() -> None:
+    get_pallet_stores.clear()
+
+
+def claim_mf_housebill() -> str:
+    """
+    Atomically claim the next Mainfreight housebill number.
+
+    Increments next_mf_housebill_seq in warehouse_settings and returns
+    the formatted string e.g. "MAS00000001".
+
+    Range allocated by Mainfreight: MAS00000000 – MAS99999999.
+    Raises RuntimeError if the warehouse row is missing.
+    """
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, next_mf_housebill_seq FROM warehouse_settings ORDER BY id LIMIT 1 FOR UPDATE"
+        ).fetchone()
+        if not row:
+            raise RuntimeError("warehouse_settings is empty — run init_db() first.")
+        seq = row["next_mf_housebill_seq"]
+        if seq >= 99_999_999:
+            raise RuntimeError(
+                "Mainfreight housebill range exhausted (MAS99999999). "
+                "Contact Mainfreight for a new range."
+            )
+        conn.execute(
+            "UPDATE warehouse_settings SET next_mf_housebill_seq = ? WHERE id = ?",
+            (seq + 1, row["id"]),
+        )
+    return f"MAS{seq:08d}"
+
+
+def save_mainfreight_booking(
+    pallet_store_code: str,
+    pallet_store_name: str,
+    pallets: int,
+    height_m: float,
+    weight_per_pallet: float,
+    use_loscam: bool,
+    housebill_number: str,
+    pickup_date: "date | None",
+    result: Any,  # mainfreight.MFResult
+    shipment_id: int | None = None,
+) -> int:
+    """
+    Persist a Mainfreight booking result.  Returns the new row id.
+    """
+    with connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO mainfreight_bookings
+                (shipment_id, pallet_store_code, pallet_store_name,
+                 pallets, height_m, weight_per_pallet, use_loscam,
+                 housebill_number, shipment_uuid, consignment_number,
+                 tracking_url, booking_status, label_error,
+                 api_response, api_error, pickup_date, booked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                shipment_id,
+                pallet_store_code,
+                pallet_store_name,
+                pallets,
+                height_m,
+                weight_per_pallet,
+                1 if use_loscam else 0,
+                housebill_number,
+                result.shipment_uuid or None,
+                result.consignment_number or None,
+                result.tracking_url or None,
+                "Booked" if result.success else "Failed",
+                result.label_error or None,
+                (result.api_response or "")[:10_000] or None,
+                (result.error or "")[:2_000] or None,
+                pickup_date.isoformat() if pickup_date else None,
+                datetime.utcnow().isoformat(timespec="seconds"),
+            ),
+        ).fetchone()
+        booking_id = row["id"]
+        audit(
+            conn, "mf_booking", booking_id, "CREATE",
+            new_values={
+                "housebill": housebill_number,
+                "store": pallet_store_name,
+                "consignment": result.consignment_number,
+                "status": "Booked" if result.success else "Failed",
+            },
+        )
+    return booking_id
+
+
+def get_mainfreight_bookings(
+    store_code: str | None = None,
+    shipment_id: int | None = None,
+    days_back: int = 90,
+) -> pd.DataFrame:
+    """
+    Return Mainfreight booking history, optionally filtered by store or shipment.
+    """
+    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+    clauses = ["DATE(booked_at) >= ?"]
+    params: list[Any] = [cutoff]
+    if store_code:
+        clauses.append("pallet_store_code = ?")
+        params.append(store_code)
+    if shipment_id is not None:
+        clauses.append("shipment_id = ?")
+        params.append(shipment_id)
+    where = "WHERE " + " AND ".join(clauses)
+    return query_df(
+        f"""
+        SELECT id, housebill_number, pallet_store_name, pallets,
+               height_m, weight_per_pallet, use_loscam,
+               consignment_number, tracking_url,
+               booking_status, label_error, api_error,
+               pickup_date, booked_at
+        FROM mainfreight_bookings
+        {where}
+        ORDER BY booked_at DESC
+        """,
+        params,
     )

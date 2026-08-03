@@ -26,6 +26,7 @@ from services import (
     add_store,
     audit_history,
     auto_suggest_mappings,
+    claim_mf_housebill,
     create_shipment,
     dashboard_metrics,
     delete_address_book_entry,
@@ -33,17 +34,18 @@ from services import (
     delete_shipment,
     delete_store,
     delete_store_mapping,
-    get_active_bookings,
     get_address_book,
     get_courier_bookings,
     get_delivery_details,
     get_delivery_runs,
     get_groups,
+    get_mainfreight_bookings,
+    get_pallet_store,
+    get_pallet_stores,
     get_shipment,
     get_stores,
     get_store_mappings,
     get_store_mapping,
-    get_store_transfers,
     get_store_with_address,
     get_unmapped_stores,
     get_warehouse,
@@ -53,15 +55,14 @@ from services import (
     query_df,
     retry_courier_booking,
     save_courier_booking,
+    save_mainfreight_booking,
     save_signature,
-    save_store_transfer,
     set_store_mapping,
     trend_data,
     update_address_book_entry,
     update_group,
     update_shipment,
     update_store,
-    update_tracking_number,
 )
 
 
@@ -292,12 +293,7 @@ def _build_courier_stores(
         return []
 
     sender = Address(
-        # "Name" is the contact person Starshipit/the courier shows for the
-        # sender; "Company" is the business name. Previously this sent the
-        # warehouse name as the Name (leaving Company blank) — now Name is
-        # the contact person (Keyur) and Company is "Shosha Warehouse".
-        name=warehouse.get("contact_name", "Keyur"),
-        company=warehouse.get("warehouse_name", "Shosha Warehouse"),
+        name=warehouse.get("warehouse_name", "Shosha Warehouse"),
         phone=warehouse.get("phone", ""),
         street=warehouse.get("address_line1", ""),
         suburb=warehouse.get("suburb", ""),
@@ -1788,9 +1784,7 @@ def render_address_book() -> None:
 
 
 def render_starshipit_diagnostics() -> None:
-    from starshipit import (
-        get_order_details, get_order_details_debug, _submit_for_label, list_available_services,
-    )
+    from starshipit import get_order_details, _submit_for_label, list_available_services
     hero("Starshipit Diagnostics", "Inspect orders and find the correct carrier service code")
 
     # ── Step 0: List all configured carriers and service codes ────────────────
@@ -1805,30 +1799,19 @@ def render_starshipit_diagnostics() -> None:
     # ── Step 1: Inspect a recent order to see what Starshipit stored ─────────
     st.subheader("Step 1 — Inspect a recent order")
     st.caption(
-        "Pick a recent booking. We'll call `GET /api/orders?order_id=…` and show "
+        "Pick a recent booking. We'll call `GET /api/orders/{order_id}` and show "
         "what `service_code` and `carrier` Starshipit actually stored — "
         "those are the values the label endpoint needs."
     )
 
     recent = query_df(
         """
-        SELECT consignment_id, label, booked_at, kind FROM (
-            SELECT cb.consignment_id AS consignment_id,
-                   'SHP-' || s.id || ' — ' || cb.store_name AS label,
-                   cb.booked_at AS booked_at,
-                   'Warehouse Shipment' AS kind
-            FROM courier_bookings cb
-            JOIN shipments s ON s.id = cb.shipment_id
-            WHERE cb.consignment_id IS NOT NULL AND cb.consignment_id != ''
-            UNION ALL
-            SELECT st.consignment_id AS consignment_id,
-                   st.source_store_name || ' → ' || st.destination_store_name AS label,
-                   st.booked_at AS booked_at,
-                   'Store Transfer' AS kind
-            FROM store_transfers st
-            WHERE st.consignment_id IS NOT NULL AND st.consignment_id != ''
-        ) x
-        ORDER BY booked_at DESC LIMIT 30
+        SELECT cb.consignment_id, cb.store_name, cb.booking_status, cb.booked_at,
+               s.id as shipment_id
+        FROM courier_bookings cb
+        JOIN shipments s ON s.id = cb.shipment_id
+        WHERE cb.consignment_id IS NOT NULL AND cb.consignment_id != ''
+        ORDER BY cb.booked_at DESC LIMIT 20
         """
     )
 
@@ -1836,16 +1819,14 @@ def render_starshipit_diagnostics() -> None:
         st.warning("No bookings with Starshipit order IDs found yet.")
     else:
         options = {
-            f"[{row['kind']}] {row['label']} (ID: {row['consignment_id']})": row['consignment_id']
+            f"SHP-{row['shipment_id']} — {row['store_name']} (ID: {row['consignment_id']})": row['consignment_id']
             for _, row in recent.iterrows()
         }
         chosen_label = st.selectbox("Select a booking", list(options))
         chosen_id    = options[chosen_label]
         st.caption(f"Starshipit order_id: **{chosen_id}**")
 
-        c_fetch, c_debug = st.columns(2)
-
-        if c_fetch.button("Fetch Order Details from Starshipit", type="primary"):
+        if st.button("Fetch Order Details from Starshipit", type="primary"):
             with st.spinner("Calling GET /api/orders/…"):
                 details = get_order_details(chosen_id)
             if "error" in details:
@@ -1860,37 +1841,8 @@ def render_starshipit_diagnostics() -> None:
                     if details.get(k) is not None
                 }
                 st.json(key_fields)
-                st.caption("Full response (all fields, bare + include= calls merged):")
+                st.caption("Full response (all fields):")
                 st.json(details)
-
-        if c_debug.button("🔍 Deep Debug — compare bare vs. include= calls"):
-            st.caption(
-                "Compare the tracking number(s) shown below against what you see for "
-                "this order on the NZ Post tracking site / Starshipit's own order screen. "
-                "Whichever section below actually contains the right number tells us "
-                "exactly which field to read from."
-            )
-            with st.spinner("Calling GET /api/orders?order_id=… (bare, then with include=Packages,…)…"):
-                debug = get_order_details_debug(chosen_id)
-
-            for section_key, section_title in [
-                ("bare_call",    "GET /api/orders?order_id=… (bare, no include=)"),
-                ("include_call", "GET /api/orders?order_id=…&include=Packages,Items,… "),
-                ("merged",       "Merged (what the app currently uses)"),
-            ]:
-                section = debug[section_key]
-                with st.expander(section_title, expanded=bool(section["tracking_paths"])):
-                    if section["tracking_paths"]:
-                        st.success(f"Found {len(section['tracking_paths'])} 'tracking'-named field(s):")
-                        st.table(
-                            pd.DataFrame(
-                                section["tracking_paths"], columns=["JSON path", "Value"]
-                            )
-                        )
-                    else:
-                        st.warning("No key containing 'tracking' found anywhere in this response.")
-                    st.caption("Full raw response:")
-                    st.json(section["raw"] or {"(empty)": True})
 
     # ── Step 2: Test label endpoint ───────────────────────────────────────────
     st.divider()
@@ -1900,6 +1852,7 @@ def render_starshipit_diagnostics() -> None:
         "above. When this returns a label PDF, that code is correct — update "
         "`SERVICE_OPTIONS` in `starshipit.py` accordingly."
     )
+
     d_col1, d_col2 = st.columns(2)
     test_order_id = d_col1.text_input("Starshipit order_id (numeric)", value=chosen_id if not recent.empty else "")
     test_svc_code = d_col2.selectbox(
@@ -1920,533 +1873,263 @@ def render_starshipit_diagnostics() -> None:
             st.caption("Try a different code from the dropdown.")
 
 
-# ── Store-to-store courier transfer presets ──────────────────────────────────
-# A4 / A5 bags are booked as a fixed-size flat-rate satchel — no per-shipment
-# dimension entry from the user. Tune these to match the actual satchel stock
-# in the warehouse; they only affect the live Starshipit quote & booking
-# package size, not what's physically packed.
-BAG_PRESETS: dict[str, dict[str, float]] = {
-    "A4 Bag": {"weight": 1.0, "length": 33.0, "width": 24.0, "height": 6.0},
-    "A5 Bag": {"weight": 0.5, "length": 24.0, "width": 17.0, "height": 5.0},
-}
-
-# Fixed NZ Post / Starshipit product codes for the flat-rate bag types — these
-# come straight from this account's live courier setup (see "See all
-# available service quotes" on the Store Transfer page, e.g. CPOLTPA4 /
-# CPOLTPA5). Swap to the *B suffix (CPOLTPA4B / CPOLTPA5B) if you want the
-# bubble-lined bag booked by default instead.
-BAG_SERVICE_CODES: dict[str, str] = {
-    "A4 Bag": "CPOLTPA4",
-    "A5 Bag": "CPOLTPA5",
-}
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def _quote_transfer(
-    source_store_id: int,
-    destination_store_id: int,
-    weight: float,
-    length: float,
-    width: float,
-    height: float,
-    packaging_type: str = "Carton",
-    name: str = "",
-) -> tuple[list[dict], str]:
-    """
-    Cached live Starshipit quote between two stores for a package of the
-    given size. Cached briefly (120s) so reruns triggered by unrelated
-    widgets (e.g. typing in Notes) don't refire the live API call.
-    """
-    from starshipit import Address, Package, get_delivery_quote
-
-    source = get_store_with_address(source_store_id)
-    destination = get_store_with_address(destination_store_id)
-    if not source or not source.get("street") or not destination or not destination.get("street"):
-        return [], "Missing address mapping."
-
-    def _addr(row: dict) -> "Address":
-        return Address(
-            name=row.get("contact_name") or row.get("company_name") or "",
-            company=row.get("company_name") or "",
-            phone=row.get("phone") or "",
-            street=row.get("street") or "",
-            suburb=row.get("suburb") or "",
-            city=row.get("city") or "",
-            postcode=row.get("postcode") or "",
-            country=row.get("country_code") or "NZ",
-            email=row.get("email") or "",
-            building=row.get("building") or "",
-        )
-
-    pkg = Package(
-        boxes=1, weight_per_box=weight, length=length, width=width, height=height,
-        packaging_type=packaging_type, name=name,
-    )
-    return get_delivery_quote(_addr(source), _addr(destination), pkg)
-
-
-def _address_from_store_row(row: dict, fallback_name: str):
-    from starshipit import Address
-    return Address(
-        name=row.get("contact_name") or row.get("company_name") or fallback_name,
-        company=row.get("company_name") or fallback_name,
-        phone=row.get("phone") or "",
-        street=row.get("street") or "",
-        suburb=row.get("suburb") or "",
-        city=row.get("city") or "",
-        postcode=row.get("postcode") or "",
-        country=row.get("country_code") or "NZ",
-        email=row.get("email") or "",
-        building=row.get("building") or "",
+def render_mainfreight_booking() -> None:
+    """Pallet booking UI — Mainfreight Daily Freight integration."""
+    from mainfreight import (
+        PalletStore,
+        PICKUP_CUTOFF,
+        PALLET_LENGTH_M,
+        PALLET_WIDTH_M,
+        create_shipment as mf_create_shipment,
+        get_label as mf_get_label,
+        default_pickup_datetime,
     )
 
+    hero("Pallet Booking", "Book a Mainfreight Daily Freight pallet delivery")
 
-def render_store_transfer() -> None:
-    hero("Store Transfer", "Book a courier between two stores")
+    # ── Test / Production indicator ──────────────────────────────────────────
+    use_prod = str(st.secrets.get("MAINFREIGHT_PRODUCTION", "false")).lower() == "true"
+    env_label = "🟢 Production" if use_prod else "🟡 TEST (apitest.mainfreight.com)"
+    st.caption(f"Environment: {env_label}")
 
-    # ── Post-booking result screen ────────────────────────────────────────────
-    if "_transfer_result" in st.session_state:
-        state = st.session_state.pop("_transfer_result")
-        if state["success"]:
-            st.success(state["message"])
-            if state.get("label_pdf"):
-                _auto_print_labels([(state["label_pdf"], state["ref"])])
-            elif state.get("label_error"):
-                st.warning(f"⚠️ Label PDF not returned by Starshipit: {state['label_error']}")
-        else:
-            st.error(state["message"])
-        if st.button("➕ Book Another Transfer", type="primary", width='stretch'):
-            st.rerun()
-        return
+    # ── Tabs ─────────────────────────────────────────────────────────────────
+    tab_book, tab_history = st.tabs(["New Booking", "Booking History"])
 
-    stores = get_stores()
-    if len(stores) < 2:
-        st.warning("Add at least two active stores before booking a transfer.")
-        return
-    store_map = dict(zip(stores["store_name"], stores["id"]))
+    # ── NEW BOOKING ──────────────────────────────────────────────────────────
+    with tab_book:
 
-    col_src, col_dst = st.columns(2)
-    source_name = col_src.selectbox("Source Store", list(store_map), key="xfer_source")
-    dest_options = [s for s in store_map if s != source_name]
-    dest_name = col_dst.selectbox("Destination Store", dest_options, key="xfer_dest")
+        # Post-booking result stored in session_state
+        result_key = "mf_last_result"
+        label_key  = "mf_last_label"
 
-    source_id = int(store_map[source_name])
-    dest_id = int(store_map[dest_name])
-
-    source_addr = get_store_with_address(source_id)
-    dest_addr = get_store_with_address(dest_id)
-
-    missing = [
-        name for name, addr in ((source_name, source_addr), (dest_name, dest_addr))
-        if not addr or not addr.get("street")
-    ]
-    if missing:
-        st.warning(
-            f"**{', '.join(missing)}** has no Address Book mapping. "
-            "Go to Admin → Address Book to map this store before booking a transfer."
-        )
-        return
-
-    transfer_date = st.date_input("Transfer Date", value=_today_nz(), key="xfer_date")
-
-    courier_type = st.radio(
-        "Courier Type", ["Box", "A4 Bag", "A5 Bag"], horizontal=True, key="xfer_type",
-    )
-
-    if courier_type == "Box":
-        st.markdown("#### 📦 Box Dimensions")
-        d1, d2, d3, d4 = st.columns(4)
-        weight = d1.number_input(
-            "Wt (kg)", min_value=0.1, max_value=50.0, value=1.0, step=0.1,
-            format="%.1f", key="xfer_weight",
-        )
-        length = d2.number_input(
-            "L (cm)", min_value=1, max_value=300, value=30, step=1, key="xfer_length",
-        )
-        width = d3.number_input(
-            "W (cm)", min_value=1, max_value=300, value=20, step=1, key="xfer_width",
-        )
-        height = d4.number_input(
-            "H (cm)", min_value=1, max_value=300, value=15, step=1, key="xfer_height",
-        )
-    else:
-        preset = BAG_PRESETS[courier_type]
-        weight, length, width, height = (
-            preset["weight"], preset["length"], preset["width"], preset["height"],
-        )
-        st.caption(
-            f"📨 {courier_type} — flat-rate satchel "
-            f"({length:.0f}×{width:.0f}×{height:.0f} cm, up to {weight:.1f} kg)."
-        )
-
-    notes = st.text_area("Notes", placeholder="Optional reference or instructions", key="xfer_notes")
-
-    # ── Live quote — fetched once per (stores, package) combo, then used both
-    # to price the page and to pick the actual service_code. No separate
-    # "NZ Post Service" dropdown: Box picks from whatever Starshipit actually
-    # quotes for that size; A4/A5 Bag always book the matching NZ Post bag
-    # product (falling back to the cheapest live option if this account
-    # doesn't have that exact code enabled).
-    # A4/A5 Bag are flat-rate NZ Post satchels, not boxes — tag them as such
-    # (packaging_type="Bag") so Starshipit records and displays them
-    # correctly (e.g. "A4 Bag" instead of a generic "Package"), matching
-    # how a manually-created Courier Pack order looks in Starshipit's UI.
-    pkg_type = "Carton" if courier_type == "Box" else "Bag"
-    pkg_name = "" if courier_type == "Box" else courier_type
-
-    st.markdown("---")
-    with st.spinner("Getting live quote from Starshipit…"):
-        quote_services, quote_error = _quote_transfer(
-            source_id, dest_id, float(weight), float(length), float(width), float(height),
-            packaging_type=pkg_type, name=pkg_name,
-        )
-
-    cost_left, cost_right = st.columns([3, 1])
-
-    if courier_type == "Box":
-        if quote_services:
-            svc_options = {
-                f"{q['service_name']} — ${q['price']:,.2f}": q for q in quote_services
-            }
-            with cost_left:
-                chosen_label = st.selectbox(
-                    "Service", list(svc_options), index=0, key="xfer_service_box",
+        # ── Show result from previous submit ────────────────────────────────
+        if st.session_state.get(result_key):
+            result = st.session_state[result_key]
+            if result.success:
+                st.success(
+                    f"✅ **Booked** — Housebill: `{result.housebill_number}`  "
+                    f"Consignment: `{result.consignment_number}`"
                 )
-            chosen = svc_options[chosen_label]
-            service_code = chosen["service_code"]
-            estimated_cost = chosen["price"]
-        else:
-            from starshipit import DEFAULT_SERVICE_CODE
-            service_code = DEFAULT_SERVICE_CODE
-            estimated_cost = None
-            with cost_left:
-                st.caption(f"⚠️ {quote_error or 'No live services available.'}")
-    else:
-        service_code = BAG_SERVICE_CODES[courier_type]
-        matched = next((q for q in quote_services if q["service_code"] == service_code), None)
-        if matched:
-            estimated_cost = matched["price"]
-            with cost_left:
-                st.caption(f"Service: **{matched['service_name']}** (`{service_code}`)")
-        elif quote_services:
-            cheapest = quote_services[0]
-            service_code = cheapest["service_code"]
-            estimated_cost = cheapest["price"]
-            with cost_left:
-                st.caption(
-                    f"`{BAG_SERVICE_CODES[courier_type]}` isn't available on this "
-                    f"account — using the cheapest live option instead: "
-                    f"**{cheapest['service_name']}**."
-                )
-        else:
-            estimated_cost = None
-            with cost_left:
-                st.caption(f"⚠️ {quote_error or 'No live services available.'}")
-
-    cost_right.metric(
-        "Estimated Cost",
-        f"${estimated_cost:,.2f}" if estimated_cost is not None else "—",
-    )
-
-    if quote_services:
-        with st.expander("See all available service quotes"):
-            st.dataframe(
-                pd.DataFrame(quote_services).rename(
-                    columns={"service_code": "Code", "service_name": "Service", "price": "Price ($)"}
-                ),
-                hide_index=True, width='stretch',
-            )
-
-    st.markdown("---")
-    book = st.button(
-        "🚚 Book Courier", type="primary", width='stretch', key="xfer_book",
-    )
-
-    if book:
-        from starshipit import create_order, Package
-
-        sender = _address_from_store_row(source_addr, source_name)
-        recipient = _address_from_store_row(dest_addr, dest_name)
-        pkg = Package(
-            boxes=1, weight_per_box=float(weight),
-            length=float(length), width=float(width), height=float(height),
-            packaging_type=pkg_type, name=pkg_name,
-        )
-        ref = f"XFER-{source_id}-{dest_id}-{int(time.time())}"
-
-        with st.spinner("Booking with Starshipit…"):
-            result = create_order(sender, recipient, pkg, ref, service_code)
-
-        save_store_transfer(
-            transfer_date, source_id, source_name, dest_id, dest_name,
-            courier_type, float(weight), float(length), float(width), float(height),
-            service_code, estimated_cost, notes, result,
-        )
-
-        if result.success:
-            msg = (
-                f"**{source_name} → {dest_name}** booked — {courier_type}. "
-                f"Tracking: **{result.tracking_number or '—'}**."
-            )
-            if estimated_cost is not None:
-                msg += f"  Estimated cost: **${estimated_cost:,.2f}**."
-            st.session_state["_transfer_result"] = {
-                "success": True,
-                "message": msg,
-                "label_pdf": result.label_pdf,
-                "label_error": result.label_error,
-                "ref": f"{source_name} to {dest_name}",
-            }
-        else:
-            st.session_state["_transfer_result"] = {
-                "success": False,
-                "message": f"Booking failed: {result.error or 'Unknown error'}",
-            }
-        st.rerun()
-
-
-# ── Live Tracking ──────────────────────────────────────────────────────────
-# Compact per-row status bar for recent courier bookings (both flows).
-# Live status is only fetched from Starshipit when the admin clicks Refresh —
-# never on every page load, since there can be hundreds of recent bookings.
-
-_TRACKING_STAGE_LABELS = ["Booked", "Dispatched", "In Transit", "Out for Delivery", "Delivered"]
-
-_TRACKING_BADGE_STATUSES: dict[str, str] = {
-    "Exception":          "🔴 Exception",
-    "Cancelled":          "⚫ Cancelled",
-    "AttemptedDelivery":  "🟠 Attempted Delivery",
-    "AwaitingCollection": "🟣 Awaiting Collection",
-    "PickupInStore":      "🟣 Ready for Pickup",
-}
-
-
-def _status_bar_html(tracking_status: str) -> str:
-    """Return a compact 5-stage HTML progress bar + label for one tracking status."""
-    from starshipit import TRACKING_STAGES
-
-    status = (tracking_status or "").strip()
-
-    if status in _TRACKING_BADGE_STATUSES:
-        return (
-            f'<div style="font-size:13px;font-weight:600">'
-            f'{_TRACKING_BADGE_STATUSES[status]}</div>'
-        )
-    if status.startswith("Return") or status in ("DroppedOff", "Manifested"):
-        return f'<div style="font-size:13px;color:#a855f7;font-weight:600">↩ {status}</div>'
-
-    try:
-        stage = TRACKING_STAGES.index(status) + 1  # 1-based
-    except ValueError:
-        stage = 1 if status else 0  # 0 = not yet scanned by the carrier
-
-    segments = "".join(
-        f'<div style="flex:1;height:6px;border-radius:3px;'
-        f'background:{"#0f766e" if i < stage else "rgba(128,128,128,0.25)"}"></div>'
-        for i in range(5)
-    )
-    bar = f'<div style="display:flex;gap:3px;margin-bottom:3px">{segments}</div>'
-    label = _TRACKING_STAGE_LABELS[stage - 1] if stage >= 1 else "Awaiting carrier scan"
-    return bar + f'<div style="font-size:12px;color:#888">{label}</div>'
-
-
-def _refresh_one_booking(row) -> None:
-    """
-    Check live status for a single booking row and cache the result.
-
-    Only ever called for one row at a time (per-row 🔄 button) — checking
-    all bookings at once was slow with dozens of rows, since each is a
-    separate Starshipit API call.
-
-    Also recovers a still-missing tracking number here (some carriers don't
-    allocate one until after booking) and persists it via
-    update_tracking_number() so it's saved for good.
-
-    Also fetches the Starshipit shipping cost (get_shipping_price_breakdown)
-    every time — /api/track doesn't return pricing, only GET /api/orders
-    does, so this always calls get_order_details() now (previously it was
-    skipped once a tracking number was already known).
-
-    Important: Starshipit's /api/track endpoint rejects requests that only
-    supply order_id with "Please specify tracking_number" — so we must NOT
-    call it until we actually have a tracking number.
-
-    A single order can contain multiple packages (multi-box store shipments
-    create one package per box), and each package can get its own NZ Post
-    tracking number — not always just one. update_tracking_number() saves
-    all of them, comma-separated, but the live /api/track status check below
-    only ever uses the first, since that endpoint expects a single number.
-    """
-    from starshipit import (
-        get_tracking_status, get_order_details, _extract_tracking_numbers,
-        get_shipping_price_breakdown,
-    )
-
-    cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
-    last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
-    price_cache: dict = st.session_state.setdefault("_tracking_price_cache", {})
-
-    tracking_num = str(row.tracking_number or "")
-    order_number = ""
-
-    if row.consignment_id:
-        try:
-            details = get_order_details(str(row.consignment_id))
-            if not tracking_num:
-                found = _extract_tracking_numbers(details)
-                if found:
-                    update_tracking_number(row.type, int(row.id), found)
-                    tracking_num = found
-            price_cache[row.consignment_id] = get_shipping_price_breakdown(details)
-            if isinstance(details, dict):
-                order_number = str(details.get("order_number") or "")
-        except Exception:
-            log.exception(
-                "Could not fetch order details for %s row id=%s", row.type, row.id
-            )
-
-    first_tracking = tracking_num.split(",")[0].strip() if tracking_num else ""
-
-    if first_tracking:
-        result = get_tracking_status(tracking_number=first_tracking)
-        # Multi-package orders (one tracking number per box) have been
-        # observed where a single package's tracking_number 404s against
-        # /api/track — "Unable to find tracking number" — even though the
-        # carrier's OWN tracking page shows full history for that exact
-        # number. Likely Starshipit indexes each package as a separate
-        # internal "child" record and this endpoint only recognizes some of
-        # them. Falling back to a lookup by order_number (the whole order's
-        # reference, which Starshipit definitely has) sidesteps that.
-        if (
-            result.get("error")
-            and "unable to find tracking number" in result["error"].lower()
-            and order_number
-        ):
-            fallback = get_tracking_status(order_number=order_number)
-            if fallback.get("status") or not fallback.get("error"):
-                result = fallback
-        cache[row.consignment_id] = result
-    else:
-        cache[row.consignment_id] = {
-            "status": "",
-            "error": "No tracking number allocated by Starshipit yet.",
-        }
-
-    last_checked[row.consignment_id] = datetime.now().strftime("%H:%M:%S")
-    st.session_state["_tracking_status_cache"] = cache
-    st.session_state["_tracking_last_checked"] = last_checked
-    st.session_state["_tracking_price_cache"] = price_cache
-
-
-def render_live_tracking() -> None:
-    hero("Live Tracking", "Status of recent courier bookings — warehouse shipments and store transfers")
-
-    bookings = get_active_bookings(days_back=30)
-    if bookings.empty:
-        st.info("No booked couriers with tracking numbers in the last 30 days.")
-        return
-
-    st.caption(
-        f"{len(bookings)} booking{'s' if len(bookings) != 1 else ''} in the last 30 days. "
-        "Click 🔄 on a booking to check its live status — checked one at a time so it stays fast."
-    )
-
-    cache: dict = st.session_state.setdefault("_tracking_status_cache", {})
-    last_checked: dict = st.session_state.setdefault("_tracking_last_checked", {})
-    price_cache: dict = st.session_state.setdefault("_tracking_price_cache", {})
-
-    from starshipit import tracking_url
-
-    st.markdown("---")
-    for row in bookings.itertuples():
-        cached = cache.get(row.consignment_id)
-        price = price_cache.get(row.consignment_id)
-        with st.container(border=True):
-            c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 2, 1])
-            type_badge = "🏬" if row.type == "Warehouse Shipment" else "🔁"
-            c1.markdown(f"{type_badge} **{row.type}**  \n{pd.Timestamp(row.date).strftime('%-d %b %Y')}")
-            c2.markdown(f"**{row.route}**  \n`{row.tracking_number or 'Tracking pending'}`")
-            c3.markdown(f"{row.carrier or '—'}  \n`{row.service_code or '—'}`")
-            with c4:
-                if cached and cached.get("status"):
-                    st.markdown(_status_bar_html(cached["status"]), unsafe_allow_html=True)
-                elif cached and cached.get("error"):
-                    err = cached["error"]
-                    # Show the full message — an earlier 80-char cutoff here
-                    # was slicing tracking numbers mid-digit, which looked
-                    # like the number itself was wrong when it wasn't.
-                    st.caption(f"⚠️ {err}")
-                    if "unable to find tracking number" in err.lower():
-                        # _refresh_one_booking() already retries this exact
-                        # case via an order_number lookup before giving up,
-                        # so seeing this means both that package-level
-                        # tracking_number AND the order-level order_number
-                        # lookup failed — most likely the carrier genuinely
-                        # hasn't manifested/scanned this parcel yet.
-                        st.caption("Retried by order number too — carrier likely hasn't manifested/scanned this yet.")
-                else:
-                    st.caption("Not checked yet")
-                if last_checked.get(row.consignment_id):
-                    st.caption(f"Checked {last_checked[row.consignment_id]}")
-                if cached and cached.get("last_updated"):
-                    # This is when the CARRIER (not us) last updated
-                    # Starshipit's cached status — Starshipit's summary
-                    # tracking_status can lag behind the carrier's real
-                    # tracking page by a day or more, so this timestamp is
-                    # the best signal of how stale "Booked"/etc. actually is.
-                    st.caption(f"Carrier last updated: {cached['last_updated']}")
-                if row.tracking_number:
-                    # tracking_number can be a comma-joined list when an
-                    # order has multiple packages (one per box) — the
-                    # tracking link only needs the first one.
-                    first_num = str(row.tracking_number).split(",")[0].strip()
-                    st.link_button(
-                        "📦 Track", tracking_url(first_num),
-                        width='stretch', key=f"track_{row.type}_{row.id}",
+                if result.tracking_url:
+                    st.markdown(f"[Track on Mainfreight]({result.tracking_url})")
+                pdf = st.session_state.get(label_key, b"")
+                if pdf:
+                    st.download_button(
+                        "📄 Download Shipping Label (PDF)",
+                        data=pdf,
+                        file_name=f"{result.housebill_number}.pdf",
+                        mime="application/pdf",
                     )
-            with c5:
-                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-                if st.button("🔄", key=f"refresh_{row.type}_{row.id}", help="Check live status"):
-                    with st.spinner("Checking…"):
-                        _refresh_one_booking(row)
-                    st.rerun()
+                elif result.label_error:
+                    st.warning(f"Label not available: {result.label_error}")
+            else:
+                st.error(f"❌ Booking failed: {result.error}")
+                if result.api_response:
+                    with st.expander("API response"):
+                        st.code(result.api_response[:3000])
 
-            # ── Shipping Rate Breakdown — only populated after 🔄 is clicked,
-            # since /api/track doesn't carry pricing (only GET /api/orders
-            # does). Hidden entirely if this order has no price data at all
-            # (e.g. account has no checkout pricing configured).
-            if price and price.get("total_shipping_price") is not None:
-                currency = price.get("total_shipping_currency", "NZD")
-                with st.expander(
-                    f"💰 Shipping Rate Breakdown — ${price['total_shipping_price']:,.2f} {currency}",
-                    expanded=False,
-                ):
-                    extra = {k: v for k, v in price.items()
-                             if k not in ("total_shipping_price", "total_shipping_currency")}
-                    if extra:
-                        st.json(extra)
-                    else:
-                        st.caption("No further breakdown returned by Starshipit for this order.")
+            if st.button("Book Another Pallet", type="primary"):
+                for k in (result_key, label_key):
+                    st.session_state.pop(k, None)
+                st.rerun()
+            return
 
-            # ── Tracking history — the raw carrier-side event log (same data
-            # NZ Post's own tracking page shows), surfaced because
-            # Starshipit's coarse tracking_status/status-bar above can lag a
-            # day or more behind this.
-            events = cached.get("events") if cached else None
-            if events:
-                with st.expander(f"📜 Tracking history ({len(events)} event{'s' if len(events) != 1 else ''})", expanded=False):
-                    for ev in events:
-                        st.markdown(f"**{ev['status'] or '—'}** — {ev['event_datetime']}  \n{ev['details']}")
+        # ── Store picker ─────────────────────────────────────────────────────
+        stores_df = get_pallet_stores()
+        if stores_df.empty:
+            st.warning(
+                "Pallet address book is empty. "
+                "Run the app once so init_db() seeds it, or contact admin."
+            )
+            return
+
+        store_options = {
+            f"{row['name']} ({row['city']})": row["code"]
+            for _, row in stores_df.iterrows()
+        }
+        selected_label = st.selectbox(
+            "Deliver to store",
+            options=list(store_options.keys()),
+        )
+        store_code = store_options[selected_label]
+        store_rec  = get_pallet_store(store_code)
+
+        if store_rec is None:
+            st.error("Store not found — try refreshing.")
+            return
+
+        # Build a PalletStore dataclass for the API layer
+        store = PalletStore(
+            code=store_rec["code"],
+            name=store_rec["name"],
+            address1=store_rec["address1"],
+            address2=store_rec["address2"] or "",
+            suburb=store_rec["suburb"] or "",
+            city=store_rec["city"],
+            postcode=store_rec["postcode"] or "",
+            state_code=store_rec["state_code"] or "NI",
+            contact_name=store_rec["contact_name"] or "",
+            contact_phone=store_rec["contact_phone"] or "",
+            contact_email=store_rec["contact_email"] or "",
+            delivery_instructions=store_rec["delivery_instructions"] or "",
+            pickup_from_depot=bool(store_rec["pickup_from_depot"]),
+            notification_email1=store_rec["notification_email1"] or "",
+            notification_events1=store_rec["notification_events1"] or "",
+            notification_email2=store_rec["notification_email2"] or "",
+            notification_events2=store_rec["notification_events2"] or "",
+        )
+
+        # ── Delivery details preview ─────────────────────────────────────────
+        with st.expander("Delivery address & notifications", expanded=False):
+            parts = [store.address1]
+            if store.address2:
+                parts.append(store.address2)
+            if store.suburb:
+                parts.append(store.suburb)
+            parts += [store.city, store.postcode]
+            st.markdown(f"**{store.name}**  \n{', '.join(p for p in parts if p)}")
+            if store.contact_name or store.contact_phone:
+                st.markdown(f"Contact: {store.contact_name} {store.contact_phone}".strip())
+            if store.delivery_instructions:
+                st.info(f"📋 {store.delivery_instructions}")
+            if store.pickup_from_depot:
+                st.warning("🏭 DEPOT COLLECT — this store picks up from Daily Freight Christchurch depot.")
+            if store.notification_email1:
+                st.caption(f"Notify: {store.notification_email1}")
+            if store.notification_email2:
+                st.caption(f"Notify: {store.notification_email2}")
+
+        st.divider()
+
+        # ── Pallet details ────────────────────────────────────────────────────
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            pallets = st.number_input(
+                "Number of pallets", min_value=1, max_value=50, value=1, step=1
+            )
+        with c2:
+            height_m = st.number_input(
+                "Height per pallet (m)", min_value=0.01, max_value=3.0,
+                value=1.2, step=0.05, format="%.2f",
+            )
+        with c3:
+            weight_kg = st.number_input(
+                "Weight per pallet (kg)", min_value=1, max_value=2000,
+                value=500, step=10,
+            )
+
+        st.caption(
+            f"Fixed footprint: {PALLET_LENGTH_M} m × {PALLET_WIDTH_M} m  "
+            f"(LOSCAM standard).  Total weight: {pallets * weight_kg:,} kg."
+        )
+
+        # ── LOSCAM hire toggle ────────────────────────────────────────────────
+        use_loscam = st.toggle(
+            "LOSCAM Retrieval",
+            value=True,
+            help="Add a LOSCAM retrieval hire line (Account 116023). "
+                 "Turn off only for non-Loscam pallets.",
+        )
+        if use_loscam:
+            st.caption(
+                f"LOSCAM RETRIEVAL — Account 116023 — {pallets} pallet{'s' if pallets > 1 else ''}"
+            )
+
+        # ── Pickup date ───────────────────────────────────────────────────────
+        st.divider()
+        today_nz = _today_nz()
+        pickup_date = st.date_input(
+            "Pickup date",
+            value=today_nz,
+            min_value=today_nz,
+            help=f"Pickup cutoff is {PICKUP_CUTOFF.strftime('%I:%M %p')}. "
+                 "Bookings after cutoff will be collected the next business day.",
+        )
+        st.caption(f"⏰ Pickup cutoff: {PICKUP_CUTOFF.strftime('%-I:%M %p')} — ensure goods are ready before this time.")
+
+        # ── Submit ────────────────────────────────────────────────────────────
+        st.divider()
+        if st.button("📦 Book Pallet Delivery", type="primary", use_container_width=True):
+            with st.spinner("Claiming housebill number…"):
+                try:
+                    housebill = claim_mf_housebill()
+                except RuntimeError as exc:
+                    st.error(str(exc))
+                    st.stop()
+
+            pickup_dt = default_pickup_datetime(pickup_date)
+
+            with st.spinner(f"Booking {pallets} pallet(s) to {store.name}…"):
+                result = mf_create_shipment(
+                    store=store,
+                    pallets=pallets,
+                    height_m=float(height_m),
+                    weight_per_pallet_kg=float(weight_kg),
+                    housebill=housebill,
+                    pickup_datetime=pickup_dt,
+                    use_loscam=use_loscam,
+                )
+
+            # Fetch label if booking succeeded
+            label_pdf = b""
+            if result.success and result.shipment_uuid:
+                with st.spinner("Fetching shipping label…"):
+                    label_pdf, lbl_err = mf_get_label(result.shipment_uuid)
+                    result.label_error = lbl_err
+
+            # Persist to DB (even on failure — so we have an audit trail)
+            try:
+                save_mainfreight_booking(
+                    pallet_store_code=store.code,
+                    pallet_store_name=store.name,
+                    pallets=pallets,
+                    height_m=float(height_m),
+                    weight_per_pallet=float(weight_kg),
+                    use_loscam=use_loscam,
+                    housebill_number=housebill,
+                    pickup_date=pickup_date,
+                    result=result,
+                )
+            except Exception as exc:
+                st.warning(f"Booking saved but DB record failed: {exc}")
+
+            st.session_state[result_key] = result
+            st.session_state[label_key]  = label_pdf
+            st.rerun()
+
+    # ── HISTORY ──────────────────────────────────────────────────────────────
+    with tab_history:
+        st.subheader("Recent pallet bookings")
+        days = st.selectbox("Show last", [7, 14, 30, 90], index=2, format_func=lambda d: f"{d} days")
+        df = get_mainfreight_bookings(days_back=int(days))
+        if df.empty:
+            st.info("No pallet bookings in this period.")
+        else:
+            disp = df[[
+                "booked_at", "housebill_number", "pallet_store_name", "pallets",
+                "weight_per_pallet", "consignment_number", "booking_status",
+            ]].copy()
+            disp.columns = [
+                "Booked At", "Housebill", "Store", "Pallets",
+                "Weight/plt (kg)", "Consignment", "Status",
+            ]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+
+            # Tracking links
+            for _, row in df[df["tracking_url"].notna() & (df["tracking_url"] != "")].iterrows():
+                st.markdown(
+                    f"[Track {row['housebill_number']}]({row['tracking_url']})"
+                    f" — {row['pallet_store_name']}"
+                )
 
 
 PAGES = {
     "Dashboard": render_dashboard,
     "New Shipment": render_new_shipment,
+    "Pallet Booking": render_mainfreight_booking,
     "Delivery Run": render_delivery_run,
     "History & Edit":             render_history,
     "Store Lookup": render_store_lookup,
-    "Store Transfer": render_store_transfer,
-    "Live Tracking": render_live_tracking,
     "Group Reporting": render_group_reporting,
     "Pallet Search": render_pallet_search,
     "Groups & Stores": render_store_management,
@@ -2459,10 +2142,10 @@ PAGES = {
 GENERAL_PAGES = [
     "Dashboard",
     "New Shipment",
+    "Pallet Booking",
     "Delivery Run",
     "History & Edit",
     "Store Lookup",
-    "Live Tracking",
 ]
 
 
@@ -2778,3 +2461,4 @@ with st.sidebar:
     st.caption("Data stored in Supabase and backed by an audit trail.")
 
 visible_pages[page]()
+
