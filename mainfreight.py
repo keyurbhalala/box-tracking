@@ -103,9 +103,12 @@ MF_TRACKING_URL = "https://www.mainfreight.com/track/MSNZS/{}"
 # API base URL — test vs production
 # ---------------------------------------------------------------------------
 
+def _is_production() -> bool:
+    return str(st.secrets.get("MAINFREIGHT_PRODUCTION", "false")).lower() == "true"
+
+
 def _base_url() -> str:
-    use_prod = str(st.secrets.get("MAINFREIGHT_PRODUCTION", "false")).lower() == "true"
-    host = "api.mainfreight.com" if use_prod else "apitest.mainfreight.com"
+    host = "api.mainfreight.com" if _is_production() else "apitest.mainfreight.com"
     return f"https://{host}/transport/1.0"
 
 
@@ -196,7 +199,6 @@ def _build_notifications(store: PalletStore) -> list[dict]:
                 seen.add(code)
         if api_events:
             result.append({
-                "eventTypeCode": "StatusUpdate",
                 "transport": {"code": "Email", "destination": email.strip()},
                 "events": api_events,
             })
@@ -287,7 +289,11 @@ def _build_payload(
         "references": [
             {"type": "SenderReference", "value": housebill},
         ],
-        "notifications": _build_notifications(store),
+        # The Mainfreight TEST environment (apitest.mainfreight.com) rejects
+        # notification emails that are not pre-registered in their test system.
+        # Skip notifications in test mode to avoid error TNI003.002.
+        # In production the store's real emails are used.
+        "notifications": _build_notifications(store) if _is_production() else [],
     }
 
     if use_loscam:
