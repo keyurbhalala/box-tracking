@@ -196,6 +196,7 @@ def _build_notifications(store: PalletStore) -> list[dict]:
                 seen.add(code)
         if api_events:
             result.append({
+                "eventTypeCode": "StatusUpdate",
                 "transport": {"code": "Email", "destination": email.strip()},
                 "events": api_events,
             })
