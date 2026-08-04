@@ -2003,9 +2003,8 @@ def _mf_ab_form(event_names: list[str], validate_fn) -> None:
         _mf_ab_clear_form()
         st.rerun()
 
-    st.markdown(
-        f"### {'Add New Store' if is_new else f'Edit — {existing.get(\"name\", code)}'}"
-    )
+    _form_title = "Add New Store" if is_new else f"Edit — {existing.get('name', code)}"
+    st.markdown(f"### {_form_title}")
 
     # ── Identity ──────────────────────────────────────────────────────────────
     ci, cn = st.columns(2)
