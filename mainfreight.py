@@ -81,9 +81,9 @@ _SENDER: dict[str, Any] = {
     "countryCode":  "NZ",
 }
 _SENDER_CONTACT: dict[str, Any] = {
-    "name":         "Keyur",
-    "phone":        "0220923220",
-    "emailAddress": "keyur.bhalala@highgroup.nz",
+    "name":         "Vishal Khera",
+    "phone":        "+6429777005",
+    "emailAddress": "vish@highgroup.nz",
 }
 
 # Mainfreight API event code mapping from CSV notification event names
