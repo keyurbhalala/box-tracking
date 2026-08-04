@@ -2012,78 +2012,95 @@ def render_mainfreight_booking() -> None:
 
         st.divider()
 
-        # ── Pallet details ────────────────────────────────────────────────────
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            pallets = st.number_input(
-                "Number of pallets", min_value=1, max_value=50, value=1, step=1
-            )
-        with c2:
-            weight_kg = st.number_input(
-                "Weight per pallet (kg)", min_value=1, max_value=2000,
-                value=500, step=10,
-            )
-        with c3:
-            freight_desc = st.text_input(
-                "Description", value="Shisha Products", max_chars=200,
-                help="Appears on the shipping label and consignment note.",
-            )
-
-        # ── LOSCAM hire toggle ────────────────────────────────────────────────
-        use_loscam = st.toggle(
+        # ── LOSCAM toggle + footprint ─────────────────────────────────────────
+        lc, rc = st.columns([1, 2])
+        use_loscam = lc.toggle(
             "LOSCAM Retrieval",
             value=True,
             help="Add a LOSCAM retrieval hire line (Account 116023). "
-                 "Turn off only for non-Loscam pallets.",
+                 "Turn off only if you are NOT sending on LOSCAM pallets.",
         )
         if use_loscam:
-            # LOSCAM pallets: fixed footprint 1.20 × 1.00 m
             pallet_length_m = PALLET_LENGTH_M
             pallet_width_m  = PALLET_WIDTH_M
-            st.caption(
-                f"LOSCAM RETRIEVAL — Account 116023 — {pallets} pallet{'s' if pallets > 1 else ''}  "
-                f"| Footprint: {PALLET_LENGTH_M} m × {PALLET_WIDTH_M} m (LOSCAM standard)"
+            rc.info(
+                f"Account 116023 · Footprint: {PALLET_LENGTH_M} m × {PALLET_WIDTH_M} m (LOSCAM standard)",
+                icon="🟠",
             )
         else:
-            # Non-LOSCAM: user supplies custom footprint dimensions
             cl, cw = st.columns(2)
             pallet_length_m = cl.number_input(
                 "Pallet length (m)", min_value=0.1, max_value=3.0,
                 value=1.2, step=0.05, format="%.2f",
-                help="Standard NZ pallet: 1.20 m",
+                help="Standard NZ wooden pallet: 1.20 m",
             )
             pallet_width_m = cw.number_input(
                 "Pallet width (m)", min_value=0.1, max_value=3.0,
                 value=1.0, step=0.05, format="%.2f",
-                help="Standard NZ pallet: 1.00 m",
+                help="Standard NZ wooden pallet: 1.00 m",
             )
 
-        # ── Per-pallet heights ────────────────────────────────────────────────
-        if pallets == 1:
-            heights_m = [st.number_input(
-                "Height per pallet (m)", min_value=0.01, max_value=3.0,
-                value=1.2, step=0.05, format="%.2f",
-            )]
-        else:
-            st.markdown("**Height per pallet (m)**")
-            # Lay out up to 5 inputs per row
-            COLS_PER_ROW = 5
-            heights_m = []
-            for row_start in range(0, int(pallets), COLS_PER_ROW):
-                row_end  = min(row_start + COLS_PER_ROW, int(pallets))
-                row_cols = st.columns(row_end - row_start)
-                for col_idx, pallet_idx in enumerate(range(row_start, row_end)):
-                    h = row_cols[col_idx].number_input(
-                        f"Pallet {pallet_idx + 1}",
-                        min_value=0.01, max_value=3.0,
-                        value=1.2, step=0.05, format="%.2f",
-                        key=f"mf_height_{pallet_idx}",
-                    )
-                    heights_m.append(h)
+        st.divider()
 
+        # ── Number of pallets ─────────────────────────────────────────────────
+        pallets = st.number_input(
+            "Number of pallets", min_value=1, max_value=50, value=1, step=1,
+        )
+
+        # ── Per-pallet table: height + weight ─────────────────────────────────
+        # Column header row
+        _PCOLS = [0.45, 3, 3]
+        hc = st.columns(_PCOLS)
+        hc[0].markdown(
+            "<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
+            "letter-spacing:0.06em;margin-bottom:0'>#</p>",
+            unsafe_allow_html=True,
+        )
+        hc[1].markdown(
+            "<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
+            "letter-spacing:0.06em;margin-bottom:0'>HEIGHT (m)</p>",
+            unsafe_allow_html=True,
+        )
+        hc[2].markdown(
+            "<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
+            "letter-spacing:0.06em;margin-bottom:0'>WEIGHT (kg)</p>",
+            unsafe_allow_html=True,
+        )
+
+        heights_m  = []
+        weights_kg = []
+        for i in range(int(pallets)):
+            pc = st.columns(_PCOLS)
+            pc[0].markdown(
+                f"<p style='margin-top:9px;font-weight:600;color:#9ca3af'>{i + 1}</p>",
+                unsafe_allow_html=True,
+            )
+            h = pc[1].number_input(
+                f"Height pallet {i + 1}", label_visibility="collapsed",
+                min_value=0.01, max_value=3.0, value=1.2, step=0.05, format="%.2f",
+                key=f"mf_h_{i}",
+            )
+            w = pc[2].number_input(
+                f"Weight pallet {i + 1}", label_visibility="collapsed",
+                min_value=1, max_value=2000, value=500, step=10,
+                key=f"mf_w_{i}",
+            )
+            heights_m.append(h)
+            weights_kg.append(w)
+
+        total_weight = sum(int(w) for w in weights_kg)
         st.caption(
-            f"Total weight: {int(pallets) * int(weight_kg):,} kg  "
-            f"| Footprint: {pallet_length_m:.2f} m × {pallet_width_m:.2f} m"
+            f"{int(pallets)} pallet{'s' if pallets > 1 else ''} · "
+            f"Total: **{total_weight:,} kg** · "
+            f"Footprint: {pallet_length_m:.2f} m × {pallet_width_m:.2f} m"
+        )
+
+        # ── Description ───────────────────────────────────────────────────────
+        freight_desc = st.text_input(
+            "Description",
+            value="Shosha Products",
+            max_chars=200,
+            help="Appears on the shipping label and consignment note.",
         )
 
         # ── Pickup date ───────────────────────────────────────────────────────
@@ -2114,7 +2131,7 @@ def render_mainfreight_booking() -> None:
                 result = mf_create_shipment(
                     store=store,
                     heights_m=[float(h) for h in heights_m],
-                    weight_per_pallet_kg=float(weight_kg),
+                    weights_kg=[float(w) for w in weights_kg],
                     housebill=housebill,
                     pickup_datetime=pickup_dt,
                     use_loscam=use_loscam,
@@ -2133,7 +2150,7 @@ def render_mainfreight_booking() -> None:
                     label_pdf, label_pdf_a4, lbl_err = mf_get_label(
                         store=store,
                         heights_m=[float(h) for h in heights_m],
-                        weight_per_pallet_kg=float(weight_kg),
+                        weights_kg=[float(w) for w in weights_kg],
                         housebill=housebill,
                         pickup_datetime=pickup_dt,
                         use_loscam=use_loscam,
@@ -2143,15 +2160,14 @@ def render_mainfreight_booking() -> None:
                     )
                     result.label_error = lbl_err
 
-            # Persist to DB (even on failure — so we have an audit trail)
-            # height_m stored as max of per-pallet heights (DB column is single REAL)
+            # Persist to DB — single REAL columns; store max height and avg weight
             try:
                 save_mainfreight_booking(
                     pallet_store_code=store.code,
                     pallet_store_name=store.name,
                     pallets=pallets,
                     height_m=max(float(h) for h in heights_m),
-                    weight_per_pallet=float(weight_kg),
+                    weight_per_pallet=round(sum(float(w) for w in weights_kg) / len(weights_kg)),
                     use_loscam=use_loscam,
                     housebill_number=housebill,
                     pickup_date=pickup_date,

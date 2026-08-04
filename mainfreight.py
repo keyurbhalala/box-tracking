@@ -207,29 +207,30 @@ def _build_notifications(store: PalletStore) -> list[dict]:
 
 def _build_freight_details(
     heights_m: list[float],
-    weight_per_pallet_kg: float,
+    weights_kg: list[float],
     length_m: float = PALLET_LENGTH_M,
     width_m: float = PALLET_WIDTH_M,
     description: str = "Shosha Products",
 ) -> list[dict]:
     """One freightDetail entry per pallet (Mainfreight tracks individual units).
 
-    heights_m   — one height value per pallet; len(heights_m) == number of pallets.
-    length_m/width_m — defaults to LOSCAM standard (1.20 × 1.00 m); pass custom
-                       values when LOSCAM is NOT used and the pallet footprint differs.
-    description — freight line description shown on label / consignment note.
+    heights_m / weights_kg — one value per pallet; both lists must have the same
+                             length (= number of pallets).
+    length_m / width_m     — LOSCAM standard (1.20 × 1.00 m) by default; pass
+                             custom values when non-LOSCAM pallet footprint differs.
+    description            — appears on the label and consignment note.
     """
     return [
         {
             "packTypeCode": "PLT",
             "description":  description,
-            "weight":       int(round(weight_per_pallet_kg)),
+            "weight":       int(round(w)),
             "length":       round(length_m, 3),
             "width":        round(width_m, 3),
             "height":       round(h, 3),
             "stackable":    False,
         }
-        for h in heights_m
+        for h, w in zip(heights_m, weights_kg)
     ]
 
 
@@ -249,7 +250,7 @@ def _build_hire_lines(pallets: int) -> list[dict]:
 def _build_payload(
     store: PalletStore,
     heights_m: list[float],
-    weight_per_pallet_kg: float,
+    weights_kg: list[float],
     housebill: str,
     pickup_datetime: datetime,
     use_loscam: bool,
@@ -296,7 +297,7 @@ def _build_payload(
             "instructions": store.delivery_instructions or None,
         },
         "freightDetails": _build_freight_details(
-            heights_m, weight_per_pallet_kg, length_m, width_m, description
+            heights_m, weights_kg, length_m, width_m, description
         ),
         "references": [
             {"type": "SenderReference", "value": housebill},
@@ -321,7 +322,7 @@ def _build_payload(
 def create_shipment(
     store: PalletStore,
     heights_m: list[float],
-    weight_per_pallet_kg: float,
+    weights_kg: list[float],
     housebill: str,
     pickup_datetime: datetime,
     use_loscam: bool = False,
@@ -335,10 +336,10 @@ def create_shipment(
     Creates a Mainfreight consignment.  Returns MFResult — never raises.
     On success: populates consignment_number + shipment_uuid for label fetch.
 
-    heights_m   — one height value per pallet (len == number of pallets).
-    length_m/width_m — LOSCAM standard by default; pass custom values when
-                       LOSCAM pallet is not used.
-    description — freight line description on the label / consignment note.
+    heights_m / weights_kg — one value per pallet (len == number of pallets).
+    length_m / width_m     — LOSCAM standard by default; pass custom values when
+                             non-LOSCAM pallet is used.
+    description            — freight line description on the label / consignment note.
     """
     pallets = len(heights_m)
     log.info(
@@ -348,7 +349,7 @@ def create_shipment(
     raw = ""
     try:
         payload = _build_payload(
-            store, heights_m, weight_per_pallet_kg,
+            store, heights_m, weights_kg,
             housebill, pickup_datetime, use_loscam,
             length_m, width_m, description,
         )
@@ -432,7 +433,7 @@ def create_shipment(
 def get_label(
     store: PalletStore,
     heights_m: list[float],
-    weight_per_pallet_kg: float,
+    weights_kg: list[float],
     housebill: str,
     pickup_datetime: datetime,
     use_loscam: bool = False,
@@ -468,7 +469,7 @@ def get_label(
     url = f"https://{host}/document/1.1/transportdocument?servicetype=system&region=NZ"
 
     shipment_payload = _build_payload(
-        store, heights_m, weight_per_pallet_kg,
+        store, heights_m, weights_kg,
         housebill, pickup_datetime, use_loscam,
         length_m, width_m, description,
     )
