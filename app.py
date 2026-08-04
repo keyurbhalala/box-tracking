@@ -2025,7 +2025,7 @@ def render_mainfreight_booking() -> None:
             )
         with c3:
             freight_desc = st.text_input(
-                "Description", value="Shosha Products", max_chars=200,
+                "Description", value="Shisha Products", max_chars=200,
                 help="Appears on the shipping label and consignment note.",
             )
 
