@@ -2070,11 +2070,20 @@ def render_mainfreight_booking() -> None:
                     use_loscam=use_loscam,
                 )
 
-            # Fetch label if booking succeeded
+            # Fetch label if booking succeeded.
+            # The Document API (v1.1) requires the full shipment payload, not a UUID.
             label_pdf = b""
-            if result.success and result.shipment_uuid:
+            if result.success:
                 with st.spinner("Fetching shipping label…"):
-                    label_pdf, lbl_err = mf_get_label(result.shipment_uuid)
+                    label_pdf, lbl_err = mf_get_label(
+                        store=store,
+                        pallets=pallets,
+                        height_m=float(height_m),
+                        weight_per_pallet_kg=float(weight_kg),
+                        housebill=housebill,
+                        pickup_datetime=pickup_dt,
+                        use_loscam=use_loscam,
+                    )
                     result.label_error = lbl_err
 
             # Persist to DB (even on failure — so we have an audit trail)

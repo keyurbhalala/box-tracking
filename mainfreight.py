@@ -408,49 +408,81 @@ def create_shipment(
         )
 
 
-def get_label(shipment_uuid: str) -> tuple[bytes, str]:
+def get_label(
+    store: PalletStore,
+    pallets: int,
+    height_m: float,
+    weight_per_pallet_kg: float,
+    housebill: str,
+    pickup_datetime: datetime,
+    use_loscam: bool = False,
+) -> tuple[bytes, str]:
     """
-    POST /transport/1.0/customer/document?region=NZ
+    POST https://{host}/document/1.1/transportdocument?servicetype=system&region=NZ
 
     Fetch the shipping label PDF for an already-created shipment.
     Returns (pdf_bytes, error_message).  Called after create_shipment() succeeds.
+
+    The Document API (v1.1) is a SEPARATE API from the Transport API (v1.0):
+      - Different host path: /document/1.1/ (not /transport/1.0/)
+      - Requires servicetype=system query param
+      - Request body: JSON array of label requests, each containing the full
+        shipment payload (NOT a shipment UUID)
+      - Response body: JSON array where content[0] is a base64-encoded PDF
     """
-    if not shipment_uuid:
-        return b"", "No shipment UUID provided"
-    log.info("Mainfreight get_label uuid=%s", shipment_uuid)
+    import base64
+
+    log.info("Mainfreight get_label housebill=%s store=%s", housebill, store.name)
+
+    host = "api.mainfreight.com" if _is_production() else "apitest.mainfreight.com"
+    url = f"https://{host}/document/1.1/transportdocument?servicetype=system&region=NZ"
+
+    shipment_payload = _build_payload(
+        store, pallets, height_m, weight_per_pallet_kg,
+        housebill, pickup_datetime, use_loscam,
+    )
+
+    payload = [
+        {
+            "type": "NZLabel",
+            "pageSize": "A4",
+            "format": "PDF",
+            "shipment": shipment_payload,
+        }
+    ]
+
     try:
-        resp = requests.post(
-            f"{_base_url()}/customer/document?region=NZ",
-            headers=_headers(),
-            json={"id": shipment_uuid},
-            timeout=30,
-        )
+        resp = requests.post(url, headers=_headers(), json=payload, timeout=30)
         log.info(
-            "Mainfreight label [%s] uuid=%s body=%.500s",
-            resp.status_code, shipment_uuid, resp.text[:500],
+            "Mainfreight label [%s] housebill=%s body=%.500s",
+            resp.status_code, housebill, resp.text[:500],
         )
+
         if resp.ok and resp.content:
-            # Response is raw PDF bytes when Content-Type is application/pdf
+            # Response is a JSON array: [{"type": "NZLabel", ..., "content": ["base64pdf"]}]
+            try:
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    item = data[0]
+                    content_list = item.get("content") or []
+                    if content_list and content_list[0]:
+                        return base64.b64decode(content_list[0]), ""
+            except Exception as parse_exc:
+                log.warning("Could not parse label JSON: %s", parse_exc)
+
+            # Fallback: raw PDF bytes if Content-Type is application/pdf
             ct = resp.headers.get("Content-Type", "")
             if "pdf" in ct.lower():
                 return resp.content, ""
-            # Some environments return JSON with a base64 field
-            try:
-                import base64
-                data = resp.json()
-                b64  = data.get("document") or data.get("content") or ""
-                if b64:
-                    return base64.b64decode(b64), ""
-            except Exception:
-                pass
-            return resp.content, ""
 
-        return b"", f"Label fetch failed (HTTP {resp.status_code}): {resp.text[:200]}"
+            return b"", f"Label response not recognised: {resp.text[:200]}"
+
+        return b"", f"Label fetch failed (HTTP {resp.status_code}): {resp.text[:300]}"
 
     except requests.exceptions.Timeout:
         return b"", "Label request timed out"
     except Exception as exc:
-        log.exception("Error fetching Mainfreight label uuid=%s", shipment_uuid)
+        log.exception("Error fetching Mainfreight label housebill=%s", housebill)
         return b"", str(exc)
 
 
