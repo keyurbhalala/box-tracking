@@ -440,6 +440,7 @@ def get_label(
     length_m: float = PALLET_LENGTH_M,
     width_m: float = PALLET_WIDTH_M,
     description: str = "Shosha Products",
+    thermal_only: bool = False,
 ) -> tuple[bytes, bytes, str]:
     """
     POST https://{host}/document/1.1/transportdocument?servicetype=system&region=NZ
@@ -474,21 +475,24 @@ def get_label(
         length_m, width_m, description,
     )
 
-    # Request both formats in one call — response array matches request array order
-    payload = [
+    # Build request array — thermal only for reprints, both formats for new bookings
+    label_request = [
         {
             "type": "NZLabel",
-            "pageSize": "STOCK_4X6",   # thermal pallet label
-            "format": "PDF",
-            "shipment": shipment_payload,
-        },
-        {
-            "type": "NZLabel",
-            "pageSize": "A4",          # A4 label sheet
+            "pageSize": "STOCK_4X6",   # thermal pallet sticker label
             "format": "PDF",
             "shipment": shipment_payload,
         },
     ]
+    if not thermal_only:
+        label_request.append(
+            {
+                "type": "NZLabel",
+                "pageSize": "A4",      # A4 label sheet (skipped for reprints)
+                "format": "PDF",
+                "shipment": shipment_payload,
+            }
+        )
 
     def _extract_pdf(item: dict) -> bytes:
         content_list = item.get("content") or []
@@ -497,10 +501,10 @@ def get_label(
         return b""
 
     try:
-        resp = requests.post(url, headers=_headers(), json=payload, timeout=30)
+        resp = requests.post(url, headers=_headers(), json=label_request, timeout=30)
         log.info(
-            "Mainfreight label [%s] housebill=%s body=%.300s",
-            resp.status_code, housebill, resp.text[:300],
+            "Mainfreight label [%s] housebill=%s thermal_only=%s body=%.300s",
+            resp.status_code, housebill, thermal_only, resp.text[:300],
         )
 
         if resp.ok and resp.content:
@@ -508,7 +512,7 @@ def get_label(
                 data = resp.json()
                 if isinstance(data, list):
                     thermal = _extract_pdf(data[0]) if len(data) > 0 else b""
-                    a4     = _extract_pdf(data[1]) if len(data) > 1 else b""
+                    a4      = _extract_pdf(data[1]) if len(data) > 1 else b""
                     if thermal or a4:
                         return thermal, a4, ""
             except Exception as parse_exc:
@@ -528,6 +532,69 @@ def get_label(
     except Exception as exc:
         log.exception("Error fetching Mainfreight label housebill=%s", housebill)
         return b"", b"", str(exc)
+
+
+def validate_address(
+    address1: str,
+    suburb: str | None,
+    city: str,
+    postcode: str | None,
+) -> tuple[bool, dict, str]:
+    """
+    POST /transport/1.0/address/validate?region=NZ
+
+    Validate a NZ delivery address against Mainfreight's address database.
+    Call this before saving a new pallet store so typos are caught early.
+
+    Returns:
+        (is_valid, validated_data, error_message)
+        On success, validated_data contains the normalised address Mainfreight
+        matched (suburb / city / postCode may differ from what was submitted).
+    """
+    payload: dict[str, str] = {"address1": address1.strip(), "countryCode": "NZ"}
+    if suburb and suburb.strip():
+        payload["suburb"] = suburb.strip()
+    if city and city.strip():
+        payload["city"] = city.strip()
+    if postcode and postcode.strip():
+        payload["postCode"] = postcode.strip()
+
+    log.info("Mainfreight validate_address payload=%s", payload)
+    try:
+        resp = requests.post(
+            f"{_base_url()}/address/validate?region=NZ",
+            headers=_headers(),
+            json=payload,
+            timeout=15,
+        )
+        log.info(
+            "Mainfreight validate_address [%s] body=%.300s",
+            resp.status_code, resp.text[:300],
+        )
+
+        if resp.ok:
+            return True, resp.json(), ""
+
+        try:
+            err  = resp.json()
+            errs = err.get("errors") or []
+            msg  = (
+                "; ".join(e.get("message", str(e)) for e in errs)
+                if errs else err.get("message", f"HTTP {resp.status_code}")
+            )
+        except Exception:
+            msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
+        return False, {}, msg
+
+    except requests.exceptions.Timeout:
+        return False, {}, "Address validation timed out (15 s)"
+    except requests.exceptions.ConnectionError as exc:
+        return False, {}, f"Connection error: {exc}"
+    except RuntimeError as exc:
+        return False, {}, str(exc)
+    except Exception as exc:
+        log.exception("Unexpected error in validate_address")
+        return False, {}, str(exc)
 
 
 def track_consignment(consignment_number: str) -> dict:

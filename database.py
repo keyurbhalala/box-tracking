@@ -103,6 +103,10 @@ _DDL_MIGRATIONS = [
     "ALTER TABLE stores ADD COLUMN IF NOT EXISTS country      TEXT DEFAULT 'New Zealand'",
     # Mainfreight housebill sequence counter (range MAS00000000 – MAS99999999)
     "ALTER TABLE warehouse_settings ADD COLUMN IF NOT EXISTS next_mf_housebill_seq INTEGER NOT NULL DEFAULT 0",
+    # Mainfreight booking — extra columns needed to reconstruct payload for label reprint
+    "ALTER TABLE mainfreight_bookings ADD COLUMN IF NOT EXISTS length_m    REAL",
+    "ALTER TABLE mainfreight_bookings ADD COLUMN IF NOT EXISTS width_m     REAL",
+    "ALTER TABLE mainfreight_bookings ADD COLUMN IF NOT EXISTS description TEXT",
 ]
 
 

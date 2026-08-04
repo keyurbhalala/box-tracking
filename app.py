@@ -39,6 +39,7 @@ from services import (
     get_delivery_details,
     get_delivery_runs,
     get_groups,
+    get_mainfreight_booking,
     get_mainfreight_bookings,
     get_pallet_store,
     get_pallet_stores,
@@ -63,6 +64,8 @@ from services import (
     update_group,
     update_shipment,
     update_store,
+    upsert_pallet_store,
+    delete_pallet_store,
 )
 
 
@@ -1873,6 +1876,293 @@ def render_starshipit_diagnostics() -> None:
             st.caption("Try a different code from the dropdown.")
 
 
+# ── Pallet Address Book ───────────────────────────────────────────────────────
+
+_MF_AB_MODE     = "mf_ab_mode"   # "list" | "form"
+_MF_AB_CODE     = "mf_ab_code"   # None = new store, str = code being edited
+_MF_AB_VALIDATE = "mf_ab_val"    # None | {"ok": bool, "data": dict, "err": str}
+_MF_AB_F        = "mf_ab_f_"     # prefix for all form field session-state keys
+
+
+def _mf_ab_clear_form() -> None:
+    """Wipe form field keys and validation result from session state."""
+    drop = [k for k in st.session_state if k.startswith(_MF_AB_F) or k == _MF_AB_VALIDATE]
+    for k in drop:
+        st.session_state.pop(k, None)
+
+
+def _mf_ab_init_form(existing: dict, event_names: list[str]) -> None:
+    """Pre-populate form session-state from existing store data (runs only once per open)."""
+    P = _MF_AB_F
+    if st.session_state.get(f"{P}__init__"):
+        return
+    st.session_state[f"{P}code"]                  = existing.get("code", "")
+    st.session_state[f"{P}name"]                  = existing.get("name", "")
+    st.session_state[f"{P}address1"]              = existing.get("address1", "")
+    st.session_state[f"{P}address2"]              = existing.get("address2") or ""
+    st.session_state[f"{P}suburb"]                = existing.get("suburb") or ""
+    st.session_state[f"{P}city"]                  = existing.get("city", "")
+    st.session_state[f"{P}postcode"]              = existing.get("postcode") or ""
+    st.session_state[f"{P}contact_name"]          = existing.get("contact_name") or ""
+    st.session_state[f"{P}contact_phone"]         = existing.get("contact_phone") or ""
+    st.session_state[f"{P}contact_email"]         = existing.get("contact_email") or ""
+    st.session_state[f"{P}delivery_instructions"] = existing.get("delivery_instructions") or ""
+    st.session_state[f"{P}pickup_from_depot"]     = bool(existing.get("pickup_from_depot", False))
+    st.session_state[f"{P}notification_email1"]   = existing.get("notification_email1") or ""
+    ev1 = [e for e in (existing.get("notification_events1") or "").split(";")
+           if e.strip() in event_names]
+    st.session_state[f"{P}notification_events1"]  = ev1
+    st.session_state[f"{P}notification_email2"]   = existing.get("notification_email2") or ""
+    ev2 = [e for e in (existing.get("notification_events2") or "").split(";")
+           if e.strip() in event_names]
+    st.session_state[f"{P}notification_events2"]  = ev2
+    st.session_state[f"{P}__init__"]              = True
+
+
+def _mf_ab_list() -> None:
+    """Store list: header, search, per-row edit/delete buttons."""
+    lc, rc = st.columns([3, 1])
+    lc.markdown("### Pallet Delivery Stores")
+    if rc.button("➕ Add Store", type="primary", use_container_width=True):
+        st.session_state[_MF_AB_MODE] = "form"
+        st.session_state[_MF_AB_CODE] = None
+        _mf_ab_clear_form()
+        st.rerun()
+
+    df = get_pallet_stores()
+    if df.empty:
+        st.info("No stores in the pallet address book yet. Click **Add Store** to create the first one.")
+        return
+
+    search = st.text_input(
+        "filter", "", placeholder="Filter by name or city…", label_visibility="collapsed",
+    )
+    if search:
+        m  = (df["name"].str.contains(search, case=False, na=False) |
+              df["city"].str.contains(search, case=False, na=False))
+        df = df[m]
+
+    if df.empty:
+        st.info("No stores match that filter.")
+        return
+
+    # Column headers
+    hc = st.columns([1, 3, 2, 2, 1, 1])
+    for col, lbl in zip(hc, ["Code", "Name", "City", "Contact", "", ""]):
+        col.markdown(
+            f"<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
+            f"letter-spacing:0.06em;margin-bottom:0'>{lbl}</p>",
+            unsafe_allow_html=True,
+        )
+
+    for _, row in df.iterrows():
+        code = row["code"]
+        rc2  = st.columns([1, 3, 2, 2, 1, 1])
+        rc2[0].markdown(f"`{code}`")
+        rc2[1].write(row["name"])
+        rc2[2].write(row.get("city") or "—")
+        rc2[3].write(row.get("contact_name") or "—")
+
+        if rc2[4].button("✏️ Edit", key=f"mf_ab_edit_{code}", use_container_width=True):
+            st.session_state[_MF_AB_MODE] = "form"
+            st.session_state[_MF_AB_CODE] = code
+            _mf_ab_clear_form()
+            st.rerun()
+
+        if rc2[5].button("🗑️", key=f"mf_ab_del_{code}",
+                          help=f"Delete {row['name']}", use_container_width=True):
+            st.session_state[f"mf_ab_del_{code}"] = True
+
+        if st.session_state.get(f"mf_ab_del_{code}"):
+            st.warning(
+                f"Delete **{row['name']}** ({code})? "
+                "Any future bookings to this store will fail."
+            )
+            cy, cn = st.columns(2)
+            if cy.button("Yes, delete", key=f"mf_ab_del_yes_{code}", type="primary"):
+                delete_pallet_store(code)
+                st.session_state.pop(f"mf_ab_del_{code}", None)
+                st.rerun()
+            if cn.button("Cancel", key=f"mf_ab_del_no_{code}"):
+                st.session_state.pop(f"mf_ab_del_{code}", None)
+                st.rerun()
+
+
+def _mf_ab_form(event_names: list[str], validate_fn) -> None:
+    """Add / edit form with Mainfreight address validation."""
+    P      = _MF_AB_F
+    code   = st.session_state.get(_MF_AB_CODE)
+    is_new = code is None
+
+    existing = {} if is_new else (get_pallet_store(code) or {})
+    _mf_ab_init_form(existing, event_names)
+
+    # Back link
+    if st.button("← Back to list"):
+        st.session_state[_MF_AB_MODE] = "list"
+        _mf_ab_clear_form()
+        st.rerun()
+
+    st.markdown(
+        f"### {'Add New Store' if is_new else f'Edit — {existing.get(\"name\", code)}'}"
+    )
+
+    # ── Identity ──────────────────────────────────────────────────────────────
+    ci, cn = st.columns(2)
+    ci.text_input(
+        "Store Code *", key=f"{P}code", disabled=not is_new,
+        help="Short unique identifier e.g. ASHB, AKL, WLG. Cannot be changed after creation.",
+    )
+    cn.text_input(
+        "Store Name *", key=f"{P}name",
+        help="Full name as it will appear on shipping labels.",
+    )
+
+    st.divider()
+
+    # ── Address ───────────────────────────────────────────────────────────────
+    st.markdown("**Delivery Address**")
+    st.text_input("Address Line 1 *", key=f"{P}address1")
+    st.text_input("Address Line 2", key=f"{P}address2")
+    cs, cc, cp = st.columns(3)
+    cs.text_input("Suburb", key=f"{P}suburb")
+    cc.text_input("City *", key=f"{P}city")
+    cp.text_input("Postcode", key=f"{P}postcode")
+
+    if st.button("🔍 Validate Address with Mainfreight", use_container_width=True):
+        ok, data, err = validate_fn(
+            address1=st.session_state.get(f"{P}address1", ""),
+            suburb=st.session_state.get(f"{P}suburb") or None,
+            city=st.session_state.get(f"{P}city", ""),
+            postcode=st.session_state.get(f"{P}postcode") or None,
+        )
+        st.session_state[_MF_AB_VALIDATE] = {"ok": ok, "data": data, "err": err}
+        st.rerun()
+
+    vr = st.session_state.get(_MF_AB_VALIDATE)
+    if vr is not None:
+        if vr["ok"]:
+            d   = vr["data"]
+            sub = d.get("suburb") or d.get("matchedSuburb") or ""
+            cty = d.get("city")   or d.get("matchedCity")   or ""
+            pst = d.get("postCode") or d.get("matchedPostCode") or ""
+            st.success(
+                f"✅ Address validated — "
+                f"{' '.join(filter(None, [sub, cty, pst])) or 'matched'}"
+            )
+        else:
+            st.error(f"❌ Validation failed: {vr['err']}")
+            st.caption(
+                "You can still save — but deliveries may fail if Mainfreight "
+                "cannot recognise the address."
+            )
+
+    st.divider()
+
+    # ── Contact ───────────────────────────────────────────────────────────────
+    st.markdown("**Store Contact**")
+    cn2, cph, cem = st.columns(3)
+    cn2.text_input("Name",  key=f"{P}contact_name")
+    cph.text_input("Phone", key=f"{P}contact_phone")
+    cem.text_input("Email", key=f"{P}contact_email")
+
+    st.divider()
+
+    # ── Delivery options ──────────────────────────────────────────────────────
+    st.markdown("**Delivery Options**")
+    st.text_area("Delivery Instructions", key=f"{P}delivery_instructions", height=80)
+    st.toggle(
+        "Depot Collection — Mainfreight holds freight at depot (does not deliver)",
+        key=f"{P}pickup_from_depot",
+    )
+
+    st.divider()
+
+    # ── Email notifications ───────────────────────────────────────────────────
+    st.markdown("**Email Notifications**")
+    st.caption("Pick which events send an email. Leave Email blank to skip.")
+
+    ne1, nev1 = st.columns([2, 3])
+    ne1.text_input(
+        "Email 1", key=f"{P}notification_email1", placeholder="manager@store.co.nz",
+    )
+    nev1.multiselect("Events", options=event_names, key=f"{P}notification_events1")
+
+    ne2, nev2 = st.columns([2, 3])
+    ne2.text_input("Email 2 (optional)", key=f"{P}notification_email2")
+    nev2.multiselect("Events ", options=event_names, key=f"{P}notification_events2")
+
+    st.divider()
+
+    # ── Save / Cancel ─────────────────────────────────────────────────────────
+    btn_cancel, btn_save = st.columns(2)
+    if btn_cancel.button("Cancel", use_container_width=True):
+        st.session_state[_MF_AB_MODE] = "list"
+        _mf_ab_clear_form()
+        st.rerun()
+
+    if btn_save.button("💾 Save Store", type="primary", use_container_width=True):
+        code_val  = (
+            st.session_state.get(f"{P}code", "") if is_new else (code or "")
+        ).strip().upper()
+        name_val  = st.session_state.get(f"{P}name", "").strip()
+        addr1_val = st.session_state.get(f"{P}address1", "").strip()
+        city_val  = st.session_state.get(f"{P}city", "").strip()
+
+        errs = []
+        if not code_val:  errs.append("Store Code is required.")
+        if not name_val:  errs.append("Store Name is required.")
+        if not addr1_val: errs.append("Address Line 1 is required.")
+        if not city_val:  errs.append("City is required.")
+
+        if errs:
+            for e in errs:
+                st.error(e)
+        else:
+            ev1 = ";".join(st.session_state.get(f"{P}notification_events1", []))
+            ev2 = ";".join(st.session_state.get(f"{P}notification_events2", []))
+            try:
+                upsert_pallet_store({
+                    "code":                  code_val,
+                    "name":                  name_val,
+                    "address1":              addr1_val,
+                    "address2":              st.session_state.get(f"{P}address2") or None,
+                    "suburb":                st.session_state.get(f"{P}suburb") or None,
+                    "city":                  city_val,
+                    "postcode":              st.session_state.get(f"{P}postcode") or None,
+                    "contact_name":          st.session_state.get(f"{P}contact_name") or None,
+                    "contact_phone":         st.session_state.get(f"{P}contact_phone") or None,
+                    "contact_email":         st.session_state.get(f"{P}contact_email") or None,
+                    "delivery_instructions": st.session_state.get(f"{P}delivery_instructions") or None,
+                    "pickup_from_depot":     st.session_state.get(f"{P}pickup_from_depot", False),
+                    "notification_email1":   st.session_state.get(f"{P}notification_email1") or None,
+                    "notification_events1":  ev1 or None,
+                    "notification_email2":   st.session_state.get(f"{P}notification_email2") or None,
+                    "notification_events2":  ev2 or None,
+                })
+                st.session_state[_MF_AB_MODE] = "list"
+                _mf_ab_clear_form()
+                st.success(f"✅ '{name_val}' saved.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Save failed: {exc}")
+
+
+def render_pallet_address_book() -> None:
+    """Pallet store address book (tab content)."""
+    from mainfreight import validate_address as mf_validate_address, _EVENT_MAP
+
+    event_names = sorted(_EVENT_MAP.keys())
+
+    if _MF_AB_MODE not in st.session_state:
+        st.session_state[_MF_AB_MODE] = "list"
+
+    if st.session_state[_MF_AB_MODE] == "form":
+        _mf_ab_form(event_names, mf_validate_address)
+    else:
+        _mf_ab_list()
+
+
 def render_mainfreight_booking() -> None:
     """Pallet booking UI — Mainfreight Daily Freight integration."""
     from mainfreight import (
@@ -1893,7 +2183,9 @@ def render_mainfreight_booking() -> None:
     st.caption(f"Environment: {env_label}")
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab_book, tab_history = st.tabs(["New Booking", "Booking History"])
+    tab_book, tab_history, tab_ab = st.tabs(
+        ["📦 New Booking", "📋 Booking History", "🗂️ Address Book"]
+    )
 
     # ── NEW BOOKING ──────────────────────────────────────────────────────────
     with tab_book:
@@ -2160,7 +2452,8 @@ def render_mainfreight_booking() -> None:
                     )
                     result.label_error = lbl_err
 
-            # Persist to DB — single REAL columns; store max height and avg weight
+            # Persist to DB — store max height / avg weight (single REAL columns);
+            # length_m, width_m, description saved so labels can be reprinted later.
             try:
                 save_mainfreight_booking(
                     pallet_store_code=store.code,
@@ -2172,6 +2465,9 @@ def render_mainfreight_booking() -> None:
                     housebill_number=housebill,
                     pickup_date=pickup_date,
                     result=result,
+                    length_m=float(pallet_length_m),
+                    width_m=float(pallet_width_m),
+                    description=freight_desc.strip() or "Shosha Products",
                 )
             except Exception as exc:
                 st.warning(f"Booking saved but DB record failed: {exc}")
@@ -2184,27 +2480,111 @@ def render_mainfreight_booking() -> None:
     # ── HISTORY ──────────────────────────────────────────────────────────────
     with tab_history:
         st.subheader("Recent pallet bookings")
-        days = st.selectbox("Show last", [7, 14, 30, 90], index=2, format_func=lambda d: f"{d} days")
+        days = st.selectbox(
+            "Show last", [7, 14, 30, 90], index=2, format_func=lambda d: f"{d} days"
+        )
         df = get_mainfreight_bookings(days_back=int(days))
         if df.empty:
             st.info("No pallet bookings in this period.")
         else:
-            disp = df[[
-                "booked_at", "housebill_number", "pallet_store_name", "pallets",
-                "weight_per_pallet", "consignment_number", "booking_status",
-            ]].copy()
-            disp.columns = [
-                "Booked At", "Housebill", "Store", "Pallets",
-                "Weight/plt (kg)", "Consignment", "Status",
-            ]
-            st.dataframe(disp, use_container_width=True, hide_index=True)
-
-            # Tracking links
-            for _, row in df[df["tracking_url"].notna() & (df["tracking_url"] != "")].iterrows():
-                st.markdown(
-                    f"[Track {row['housebill_number']}]({row['tracking_url']})"
-                    f" — {row['pallet_store_name']}"
+            # Column widths: date | housebill | store | plts | consignment | status | reprint
+            _HC = [1.4, 1.5, 2.5, 0.5, 1.8, 0.8, 0.7]
+            hdr = st.columns(_HC)
+            for col, lbl in zip(hdr, ["Date", "Housebill", "Store", "Plts", "Consignment", "Status", ""]):
+                col.markdown(
+                    f"<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
+                    f"letter-spacing:0.06em;margin-bottom:0'>{lbl}</p>",
+                    unsafe_allow_html=True,
                 )
+
+            for _, row in df.iterrows():
+                hb     = row["housebill_number"]
+                status = row.get("booking_status", "")
+                rc     = st.columns(_HC)
+
+                rc[0].write(str(row.get("booked_at", ""))[:10])
+                rc[1].write(hb)
+                rc[2].write(row.get("pallet_store_name", ""))
+                rc[3].write(str(row.get("pallets", "")))
+
+                cons = row.get("consignment_number") or "—"
+                turl = row.get("tracking_url") or ""
+                if turl:
+                    rc[4].markdown(f"[{cons}]({turl})")
+                else:
+                    rc[4].write(cons)
+
+                rc[5].write("✅ Booked" if status == "Booked" else ("❌ Failed" if status == "Failed" else status))
+
+                # Reprint button — only for successful bookings
+                rp_key    = f"mf_rp_{hb}"
+                rp_dl_key = f"mf_rp_label_{hb}"
+
+                if status == "Booked":
+                    if rc[6].button("🖨️", key=rp_key, help="Reprint thermal label",
+                                    use_container_width=True):
+                        with st.spinner(f"Fetching label for {hb}…"):
+                            booking = get_mainfreight_booking(hb)
+                            if booking:
+                                store_rec = get_pallet_store(booking["pallet_store_code"])
+                                if store_rec:
+                                    from mainfreight import (
+                                        PalletStore as _PS,
+                                        default_pickup_datetime as _dpt,
+                                        get_label as _mfgl,
+                                        PALLET_LENGTH_M as _PLM,
+                                        PALLET_WIDTH_M  as _PWM,
+                                    )
+                                    _store = _PS(**{
+                                        k: store_rec[k]
+                                        for k in _PS.__dataclass_fields__
+                                    })
+                                    _n    = int(booking["pallets"])
+                                    _h    = float(booking["height_m"])
+                                    _w    = float(booking["weight_per_pallet"])
+                                    _l    = float(booking.get("length_m") or _PLM)
+                                    _wd   = float(booking.get("width_m")  or _PWM)
+                                    _desc = booking.get("description") or "Shosha Products"
+                                    _pdt  = _dpt(
+                                        date.fromisoformat(booking["pickup_date"])
+                                        if booking.get("pickup_date") else date.today()
+                                    )
+                                    thermal, _, _err = _mfgl(
+                                        store=_store,
+                                        heights_m=[_h] * _n,
+                                        weights_kg=[_w] * _n,
+                                        housebill=hb,
+                                        pickup_datetime=_pdt,
+                                        use_loscam=bool(booking.get("use_loscam")),
+                                        length_m=_l,
+                                        width_m=_wd,
+                                        description=_desc,
+                                        thermal_only=True,
+                                    )
+                                    if thermal:
+                                        st.session_state[rp_dl_key] = thermal
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Label fetch failed: {_err}")
+                                else:
+                                    st.error("Store no longer in address book — cannot reprint.")
+                            else:
+                                st.error("Booking record not found.")
+
+                # Show download button whenever label bytes are available
+                label_bytes = st.session_state.get(rp_dl_key, b"")
+                if label_bytes:
+                    st.download_button(
+                        f"⬇️ Download {hb} label",
+                        data=label_bytes,
+                        file_name=f"{hb}_ThermalLabel.pdf",
+                        mime="application/pdf",
+                        key=f"mf_rp_dl_btn_{hb}",
+                    )
+
+    # ── ADDRESS BOOK ─────────────────────────────────────────────────────────
+    with tab_ab:
+        render_pallet_address_book()
 
 
 PAGES = {

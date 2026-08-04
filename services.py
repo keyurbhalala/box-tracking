@@ -1117,6 +1117,74 @@ def _clear_pallet_store_cache() -> None:
     get_pallet_stores.clear()
 
 
+def upsert_pallet_store(data: dict) -> None:
+    """
+    Insert or update a pallet_address_book row.
+
+    Required keys: code, name, address1, city.
+    All other keys are optional and default to None.
+    code is normalised to UPPERCASE before insert/update.
+    """
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO pallet_address_book
+                (code, name, address1, address2, suburb, city, postcode,
+                 state_code, contact_name, contact_phone, contact_email,
+                 delivery_instructions, pickup_from_depot,
+                 notification_email1, notification_events1,
+                 notification_email2, notification_events2,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(code) DO UPDATE SET
+                name                  = excluded.name,
+                address1              = excluded.address1,
+                address2              = excluded.address2,
+                suburb                = excluded.suburb,
+                city                  = excluded.city,
+                postcode              = excluded.postcode,
+                state_code            = excluded.state_code,
+                contact_name          = excluded.contact_name,
+                contact_phone         = excluded.contact_phone,
+                contact_email         = excluded.contact_email,
+                delivery_instructions = excluded.delivery_instructions,
+                pickup_from_depot     = excluded.pickup_from_depot,
+                notification_email1   = excluded.notification_email1,
+                notification_events1  = excluded.notification_events1,
+                notification_email2   = excluded.notification_email2,
+                notification_events2  = excluded.notification_events2,
+                updated_at            = CURRENT_TIMESTAMP
+            """,
+            (
+                data["code"].strip().upper(),
+                data["name"].strip(),
+                data["address1"].strip(),
+                (data.get("address2") or "").strip() or None,
+                (data.get("suburb") or "").strip() or None,
+                data["city"].strip(),
+                (data.get("postcode") or "").strip() or None,
+                (data.get("state_code") or "").strip() or None,
+                (data.get("contact_name") or "").strip() or None,
+                (data.get("contact_phone") or "").strip() or None,
+                (data.get("contact_email") or "").strip() or None,
+                (data.get("delivery_instructions") or "").strip() or None,
+                int(bool(data.get("pickup_from_depot", False))),
+                (data.get("notification_email1") or "").strip() or None,
+                (data.get("notification_events1") or "").strip() or None,
+                (data.get("notification_email2") or "").strip() or None,
+                (data.get("notification_events2") or "").strip() or None,
+            ),
+        )
+    _clear_pallet_store_cache()
+
+
+def delete_pallet_store(code: str) -> None:
+    """Permanently remove a pallet_address_book row by store code."""
+    with connection() as conn:
+        conn.execute("DELETE FROM pallet_address_book WHERE code = ?", (code.strip().upper(),))
+    _clear_pallet_store_cache()
+
+
 def claim_mf_housebill() -> str:
     """
     Atomically claim the next Mainfreight housebill number.
@@ -1146,6 +1214,16 @@ def claim_mf_housebill() -> str:
     return f"MAS{seq:08d}"
 
 
+def get_mainfreight_booking(housebill_number: str) -> "dict | None":
+    """Return a single mainfreight_bookings row as a dict, or None if not found."""
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM mainfreight_bookings WHERE housebill_number = ?",
+            (housebill_number,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def save_mainfreight_booking(
     pallet_store_code: str,
     pallet_store_name: str,
@@ -1157,9 +1235,15 @@ def save_mainfreight_booking(
     pickup_date: "date | None",
     result: Any,  # mainfreight.MFResult
     shipment_id: int | None = None,
+    length_m: float = 1.2,
+    width_m: float = 1.0,
+    description: str = "Shosha Products",
 ) -> int:
     """
     Persist a Mainfreight booking result.  Returns the new row id.
+
+    length_m / width_m / description are stored so labels can be reprinted
+    later without needing the user to re-enter the original booking details.
     """
     with connection() as conn:
         row = conn.execute(
@@ -1169,8 +1253,9 @@ def save_mainfreight_booking(
                  pallets, height_m, weight_per_pallet, use_loscam,
                  housebill_number, shipment_uuid, consignment_number,
                  tracking_url, booking_status, label_error,
-                 api_response, api_error, pickup_date, booked_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 api_response, api_error, pickup_date, booked_at,
+                 length_m, width_m, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
@@ -1191,6 +1276,9 @@ def save_mainfreight_booking(
                 (result.error or "")[:2_000] or None,
                 pickup_date.isoformat() if pickup_date else None,
                 datetime.utcnow().isoformat(timespec="seconds"),
+                round(length_m, 3),
+                round(width_m, 3),
+                description or "Shosha Products",
             ),
         ).fetchone()
         booking_id = row["id"]
