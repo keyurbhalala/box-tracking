@@ -1899,8 +1899,9 @@ def render_mainfreight_booking() -> None:
     with tab_book:
 
         # Post-booking result stored in session_state
-        result_key = "mf_last_result"
-        label_key  = "mf_last_label"
+        result_key    = "mf_last_result"
+        label_key     = "mf_last_label"
+        label_key_a4  = "mf_last_label_a4"
 
         # ── Show result from previous submit ────────────────────────────────
         if st.session_state.get(result_key):
@@ -1912,14 +1913,24 @@ def render_mainfreight_booking() -> None:
                 )
                 if result.tracking_url:
                     st.markdown(f"[Track on Mainfreight]({result.tracking_url})")
-                pdf = st.session_state.get(label_key, b"")
-                if pdf:
-                    st.download_button(
-                        "📄 Download Shipping Label (PDF)",
-                        data=pdf,
-                        file_name=f"{result.housebill_number}.pdf",
-                        mime="application/pdf",
-                    )
+                thermal = st.session_state.get(label_key, b"")
+                a4      = st.session_state.get(label_key_a4, b"")
+                if thermal or a4:
+                    col1, col2 = st.columns(2)
+                    if thermal:
+                        col1.download_button(
+                            "🏷️ Thermal Label (STOCK_4X6)",
+                            data=thermal,
+                            file_name=f"{result.housebill_number}_ThermalLabel.pdf",
+                            mime="application/pdf",
+                        )
+                    if a4:
+                        col2.download_button(
+                            "📄 A4 Label Sheet",
+                            data=a4,
+                            file_name=f"{result.housebill_number}_A4Label.pdf",
+                            mime="application/pdf",
+                        )
                 elif result.label_error:
                     st.warning(f"Label not available: {result.label_error}")
             else:
@@ -1929,7 +1940,7 @@ def render_mainfreight_booking() -> None:
                         st.code(result.api_response[:3000])
 
             if st.button("Book Another Pallet", type="primary"):
-                for k in (result_key, label_key):
+                for k in (result_key, label_key, label_key_a4):
                     st.session_state.pop(k, None)
                 st.rerun()
             return
@@ -2008,20 +2019,15 @@ def render_mainfreight_booking() -> None:
                 "Number of pallets", min_value=1, max_value=50, value=1, step=1
             )
         with c2:
-            height_m = st.number_input(
-                "Height per pallet (m)", min_value=0.01, max_value=3.0,
-                value=1.2, step=0.05, format="%.2f",
-            )
-        with c3:
             weight_kg = st.number_input(
                 "Weight per pallet (kg)", min_value=1, max_value=2000,
                 value=500, step=10,
             )
-
-        st.caption(
-            f"Fixed footprint: {PALLET_LENGTH_M} m × {PALLET_WIDTH_M} m  "
-            f"(LOSCAM standard).  Total weight: {pallets * weight_kg:,} kg."
-        )
+        with c3:
+            freight_desc = st.text_input(
+                "Description", value="Shosha Products", max_chars=200,
+                help="Appears on the shipping label and consignment note.",
+            )
 
         # ── LOSCAM hire toggle ────────────────────────────────────────────────
         use_loscam = st.toggle(
@@ -2031,9 +2037,54 @@ def render_mainfreight_booking() -> None:
                  "Turn off only for non-Loscam pallets.",
         )
         if use_loscam:
+            # LOSCAM pallets: fixed footprint 1.20 × 1.00 m
+            pallet_length_m = PALLET_LENGTH_M
+            pallet_width_m  = PALLET_WIDTH_M
             st.caption(
-                f"LOSCAM RETRIEVAL — Account 116023 — {pallets} pallet{'s' if pallets > 1 else ''}"
+                f"LOSCAM RETRIEVAL — Account 116023 — {pallets} pallet{'s' if pallets > 1 else ''}  "
+                f"| Footprint: {PALLET_LENGTH_M} m × {PALLET_WIDTH_M} m (LOSCAM standard)"
             )
+        else:
+            # Non-LOSCAM: user supplies custom footprint dimensions
+            cl, cw = st.columns(2)
+            pallet_length_m = cl.number_input(
+                "Pallet length (m)", min_value=0.1, max_value=3.0,
+                value=1.2, step=0.05, format="%.2f",
+                help="Standard NZ pallet: 1.20 m",
+            )
+            pallet_width_m = cw.number_input(
+                "Pallet width (m)", min_value=0.1, max_value=3.0,
+                value=1.0, step=0.05, format="%.2f",
+                help="Standard NZ pallet: 1.00 m",
+            )
+
+        # ── Per-pallet heights ────────────────────────────────────────────────
+        if pallets == 1:
+            heights_m = [st.number_input(
+                "Height per pallet (m)", min_value=0.01, max_value=3.0,
+                value=1.2, step=0.05, format="%.2f",
+            )]
+        else:
+            st.markdown("**Height per pallet (m)**")
+            # Lay out up to 5 inputs per row
+            COLS_PER_ROW = 5
+            heights_m = []
+            for row_start in range(0, int(pallets), COLS_PER_ROW):
+                row_end  = min(row_start + COLS_PER_ROW, int(pallets))
+                row_cols = st.columns(row_end - row_start)
+                for col_idx, pallet_idx in enumerate(range(row_start, row_end)):
+                    h = row_cols[col_idx].number_input(
+                        f"Pallet {pallet_idx + 1}",
+                        min_value=0.01, max_value=3.0,
+                        value=1.2, step=0.05, format="%.2f",
+                        key=f"mf_height_{pallet_idx}",
+                    )
+                    heights_m.append(h)
+
+        st.caption(
+            f"Total weight: {int(pallets) * int(weight_kg):,} kg  "
+            f"| Footprint: {pallet_length_m:.2f} m × {pallet_width_m:.2f} m"
+        )
 
         # ── Pickup date ───────────────────────────────────────────────────────
         st.divider()
@@ -2062,37 +2113,44 @@ def render_mainfreight_booking() -> None:
             with st.spinner(f"Booking {pallets} pallet(s) to {store.name}…"):
                 result = mf_create_shipment(
                     store=store,
-                    pallets=pallets,
-                    height_m=float(height_m),
+                    heights_m=[float(h) for h in heights_m],
                     weight_per_pallet_kg=float(weight_kg),
                     housebill=housebill,
                     pickup_datetime=pickup_dt,
                     use_loscam=use_loscam,
+                    length_m=float(pallet_length_m),
+                    width_m=float(pallet_width_m),
+                    description=freight_desc.strip() or "Shosha Products",
                 )
 
-            # Fetch label if booking succeeded.
+            # Fetch labels if booking succeeded.
             # The Document API (v1.1) requires the full shipment payload, not a UUID.
+            # Returns both thermal (STOCK_4X6) and A4 label PDFs in one API call.
             label_pdf = b""
+            label_pdf_a4 = b""
             if result.success:
-                with st.spinner("Fetching shipping label…"):
-                    label_pdf, lbl_err = mf_get_label(
+                with st.spinner("Fetching shipping labels…"):
+                    label_pdf, label_pdf_a4, lbl_err = mf_get_label(
                         store=store,
-                        pallets=pallets,
-                        height_m=float(height_m),
+                        heights_m=[float(h) for h in heights_m],
                         weight_per_pallet_kg=float(weight_kg),
                         housebill=housebill,
                         pickup_datetime=pickup_dt,
                         use_loscam=use_loscam,
+                        length_m=float(pallet_length_m),
+                        width_m=float(pallet_width_m),
+                        description=freight_desc.strip() or "Shosha Products",
                     )
                     result.label_error = lbl_err
 
             # Persist to DB (even on failure — so we have an audit trail)
+            # height_m stored as max of per-pallet heights (DB column is single REAL)
             try:
                 save_mainfreight_booking(
                     pallet_store_code=store.code,
                     pallet_store_name=store.name,
                     pallets=pallets,
-                    height_m=float(height_m),
+                    height_m=max(float(h) for h in heights_m),
                     weight_per_pallet=float(weight_kg),
                     use_loscam=use_loscam,
                     housebill_number=housebill,
@@ -2102,8 +2160,9 @@ def render_mainfreight_booking() -> None:
             except Exception as exc:
                 st.warning(f"Booking saved but DB record failed: {exc}")
 
-            st.session_state[result_key] = result
-            st.session_state[label_key]  = label_pdf
+            st.session_state[result_key]   = result
+            st.session_state[label_key]    = label_pdf
+            st.session_state[label_key_a4] = label_pdf_a4
             st.rerun()
 
     # ── HISTORY ──────────────────────────────────────────────────────────────

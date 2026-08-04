@@ -206,22 +206,30 @@ def _build_notifications(store: PalletStore) -> list[dict]:
 
 
 def _build_freight_details(
-    pallets: int,
-    height_m: float,
+    heights_m: list[float],
     weight_per_pallet_kg: float,
+    length_m: float = PALLET_LENGTH_M,
+    width_m: float = PALLET_WIDTH_M,
+    description: str = "Shosha Products",
 ) -> list[dict]:
-    """One freightDetail entry per pallet (Mainfreight tracks individual units)."""
+    """One freightDetail entry per pallet (Mainfreight tracks individual units).
+
+    heights_m   — one height value per pallet; len(heights_m) == number of pallets.
+    length_m/width_m — defaults to LOSCAM standard (1.20 × 1.00 m); pass custom
+                       values when LOSCAM is NOT used and the pallet footprint differs.
+    description — freight line description shown on label / consignment note.
+    """
     return [
         {
             "packTypeCode": "PLT",
-            "description":  "Shosha products",
+            "description":  description,
             "weight":       int(round(weight_per_pallet_kg)),
-            "length":       PALLET_LENGTH_M,
-            "width":        PALLET_WIDTH_M,
-            "height":       round(height_m, 3),
+            "length":       round(length_m, 3),
+            "width":        round(width_m, 3),
+            "height":       round(h, 3),
             "stackable":    False,
         }
-        for _ in range(pallets)
+        for h in heights_m
     ]
 
 
@@ -240,12 +248,14 @@ def _build_hire_lines(pallets: int) -> list[dict]:
 
 def _build_payload(
     store: PalletStore,
-    pallets: int,
-    height_m: float,
+    heights_m: list[float],
     weight_per_pallet_kg: float,
     housebill: str,
     pickup_datetime: datetime,
     use_loscam: bool,
+    length_m: float = PALLET_LENGTH_M,
+    width_m: float = PALLET_WIDTH_M,
+    description: str = "Shosha Products",
 ) -> dict:
     payload: dict[str, Any] = {
         "account":           {"code": _ACCOUNT_CODE},
@@ -285,7 +295,9 @@ def _build_payload(
             },
             "instructions": store.delivery_instructions or None,
         },
-        "freightDetails": _build_freight_details(pallets, height_m, weight_per_pallet_kg),
+        "freightDetails": _build_freight_details(
+            heights_m, weight_per_pallet_kg, length_m, width_m, description
+        ),
         "references": [
             {"type": "SenderReference", "value": housebill},
         ],
@@ -297,7 +309,7 @@ def _build_payload(
     }
 
     if use_loscam:
-        payload["hireLines"] = _build_hire_lines(pallets)
+        payload["hireLines"] = _build_hire_lines(len(heights_m))
 
     return payload
 
@@ -308,19 +320,27 @@ def _build_payload(
 
 def create_shipment(
     store: PalletStore,
-    pallets: int,
-    height_m: float,
+    heights_m: list[float],
     weight_per_pallet_kg: float,
     housebill: str,
     pickup_datetime: datetime,
     use_loscam: bool = False,
+    length_m: float = PALLET_LENGTH_M,
+    width_m: float = PALLET_WIDTH_M,
+    description: str = "Shosha Products",
 ) -> MFResult:
     """
     POST /transport/1.0/customer/shipment?region=NZ
 
     Creates a Mainfreight consignment.  Returns MFResult — never raises.
     On success: populates consignment_number + shipment_uuid for label fetch.
+
+    heights_m   — one height value per pallet (len == number of pallets).
+    length_m/width_m — LOSCAM standard by default; pass custom values when
+                       LOSCAM pallet is not used.
+    description — freight line description on the label / consignment note.
     """
+    pallets = len(heights_m)
     log.info(
         "Mainfreight create_shipment housebill=%s store=%s pallets=%d loscam=%s",
         housebill, store.name, pallets, use_loscam,
@@ -328,8 +348,9 @@ def create_shipment(
     raw = ""
     try:
         payload = _build_payload(
-            store, pallets, height_m, weight_per_pallet_kg,
+            store, heights_m, weight_per_pallet_kg,
             housebill, pickup_datetime, use_loscam,
+            length_m, width_m, description,
         )
         resp = requests.post(
             f"{_base_url()}/customer/shipment?region=NZ",
@@ -410,25 +431,34 @@ def create_shipment(
 
 def get_label(
     store: PalletStore,
-    pallets: int,
-    height_m: float,
+    heights_m: list[float],
     weight_per_pallet_kg: float,
     housebill: str,
     pickup_datetime: datetime,
     use_loscam: bool = False,
-) -> tuple[bytes, str]:
+    length_m: float = PALLET_LENGTH_M,
+    width_m: float = PALLET_WIDTH_M,
+    description: str = "Shosha Products",
+) -> tuple[bytes, bytes, str]:
     """
     POST https://{host}/document/1.1/transportdocument?servicetype=system&region=NZ
 
-    Fetch the shipping label PDF for an already-created shipment.
-    Returns (pdf_bytes, error_message).  Called after create_shipment() succeeds.
+    Fetch shipping label PDFs for an already-created shipment.
+    Returns (thermal_pdf, a4_pdf, error_message).
+
+    Requests both label formats in a single API call (body is an array):
+      - STOCK_4X6  → thermal pallet label  (one page per pallet, goes on the pallet)
+      - A4         → A4 label sheet        (for records / driver handover)
+
+    Note: the A4 consignment note (freight docket with driver signature fields)
+    that Mainfreight generates via their portal is NOT available through this API.
+    Mainfreight produces that document internally and gives it to their driver.
 
     The Document API (v1.1) is a SEPARATE API from the Transport API (v1.0):
       - Different host path: /document/1.1/ (not /transport/1.0/)
       - Requires servicetype=system query param
-      - Request body: JSON array of label requests, each containing the full
-        shipment payload (NOT a shipment UUID)
-      - Response body: JSON array where content[0] is a base64-encoded PDF
+      - Request body: JSON array of label requests, each with the full shipment payload
+      - Response body: JSON array where content[0] is a base64-encoded PDF per item
     """
     import base64
 
@@ -438,52 +468,65 @@ def get_label(
     url = f"https://{host}/document/1.1/transportdocument?servicetype=system&region=NZ"
 
     shipment_payload = _build_payload(
-        store, pallets, height_m, weight_per_pallet_kg,
+        store, heights_m, weight_per_pallet_kg,
         housebill, pickup_datetime, use_loscam,
+        length_m, width_m, description,
     )
 
+    # Request both formats in one call — response array matches request array order
     payload = [
         {
             "type": "NZLabel",
-            "pageSize": "A4",
+            "pageSize": "STOCK_4X6",   # thermal pallet label
             "format": "PDF",
             "shipment": shipment_payload,
-        }
+        },
+        {
+            "type": "NZLabel",
+            "pageSize": "A4",          # A4 label sheet
+            "format": "PDF",
+            "shipment": shipment_payload,
+        },
     ]
+
+    def _extract_pdf(item: dict) -> bytes:
+        content_list = item.get("content") or []
+        if content_list and content_list[0]:
+            return base64.b64decode(content_list[0])
+        return b""
 
     try:
         resp = requests.post(url, headers=_headers(), json=payload, timeout=30)
         log.info(
-            "Mainfreight label [%s] housebill=%s body=%.500s",
-            resp.status_code, housebill, resp.text[:500],
+            "Mainfreight label [%s] housebill=%s body=%.300s",
+            resp.status_code, housebill, resp.text[:300],
         )
 
         if resp.ok and resp.content:
-            # Response is a JSON array: [{"type": "NZLabel", ..., "content": ["base64pdf"]}]
             try:
                 data = resp.json()
-                if isinstance(data, list) and data:
-                    item = data[0]
-                    content_list = item.get("content") or []
-                    if content_list and content_list[0]:
-                        return base64.b64decode(content_list[0]), ""
+                if isinstance(data, list):
+                    thermal = _extract_pdf(data[0]) if len(data) > 0 else b""
+                    a4     = _extract_pdf(data[1]) if len(data) > 1 else b""
+                    if thermal or a4:
+                        return thermal, a4, ""
             except Exception as parse_exc:
                 log.warning("Could not parse label JSON: %s", parse_exc)
 
-            # Fallback: raw PDF bytes if Content-Type is application/pdf
+            # Fallback: raw bytes (only one doc returned)
             ct = resp.headers.get("Content-Type", "")
             if "pdf" in ct.lower():
-                return resp.content, ""
+                return resp.content, b"", ""
 
-            return b"", f"Label response not recognised: {resp.text[:200]}"
+            return b"", b"", f"Label response not recognised: {resp.text[:200]}"
 
-        return b"", f"Label fetch failed (HTTP {resp.status_code}): {resp.text[:300]}"
+        return b"", b"", f"Label fetch failed (HTTP {resp.status_code}): {resp.text[:300]}"
 
     except requests.exceptions.Timeout:
-        return b"", "Label request timed out"
+        return b"", b"", "Label request timed out"
     except Exception as exc:
         log.exception("Error fetching Mainfreight label housebill=%s", housebill)
-        return b"", str(exc)
+        return b"", b"", str(exc)
 
 
 def track_consignment(consignment_number: str) -> dict:
