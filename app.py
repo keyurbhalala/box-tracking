@@ -2233,20 +2233,25 @@ def render_mainfreight_booking() -> None:
 
             # ── Debug payload viewer ───────────────────────────────────────
             if "mf_debug_payload" in st.session_state:
+                _is_prod = str(st.secrets.get("MAINFREIGHT_PRODUCTION", "false")).lower() == "true"
+                _mf_host = "api.mainfreight.com" if _is_prod else "apitest.mainfreight.com"
+                _hb_label = st.session_state.get("mf_debug_housebill", "")
+
                 with st.expander(
-                    f"🔍 Debug — Payload sent to Mainfreight "
-                    f"({st.session_state.get('mf_debug_housebill', '')})",
-                    expanded=False,
+                    f"🔍 Debug — Shipment payload ({_hb_label})", expanded=False
                 ):
-                    st.caption(
-                        "POST https://apitest.mainfreight.com/transport/1.0/customer/shipment?region=NZ"
-                        if not str(st.secrets.get("MAINFREIGHT_PRODUCTION", "false")).lower() == "true"
-                        else "POST https://api.mainfreight.com/transport/1.0/customer/shipment?region=NZ"
-                    )
+                    st.caption(f"POST https://{_mf_host}/transport/1.0/customer/shipment?region=NZ")
                     st.json(st.session_state["mf_debug_payload"])
 
+                if "mf_debug_label_payload" in st.session_state:
+                    with st.expander(
+                        f"🔍 Debug — Label fetch payload ({_hb_label})", expanded=False
+                    ):
+                        st.caption(f"POST https://{_mf_host}/document/1.1/transportdocument?servicetype=system&region=NZ")
+                        st.json(st.session_state["mf_debug_label_payload"])
+
             if st.button("Book Another Pallet", type="primary"):
-                for k in (result_key, label_key, label_key_a4, "mf_debug_payload", "mf_debug_housebill"):
+                for k in (result_key, label_key, label_key_a4, "mf_debug_payload", "mf_debug_housebill", "mf_debug_label_payload"):
                     st.session_state.pop(k, None)
                 st.rerun()
             return
@@ -2445,8 +2450,13 @@ def render_mainfreight_booking() -> None:
                 width_m=float(pallet_width_m),
                 description=freight_desc.strip() or "Shosha Products",
             )
-            st.session_state["mf_debug_payload"] = mf_build_payload(**_debug_args)
+            _debug_shipment = mf_build_payload(**_debug_args)
+            st.session_state["mf_debug_payload"] = _debug_shipment
             st.session_state["mf_debug_housebill"] = housebill
+            st.session_state["mf_debug_label_payload"] = [
+                {"type": "NZLabel", "pageSize": "STOCK_4X6", "format": "PDF", "shipment": _debug_shipment},
+                {"type": "NZLabel", "pageSize": "A4",        "format": "PDF", "shipment": _debug_shipment},
+            ]
 
             with st.spinner(f"Booking {pallets} pallet(s) to {store.name}…"):
                 result = mf_create_shipment(
