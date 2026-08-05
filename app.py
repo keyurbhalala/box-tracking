@@ -2171,6 +2171,7 @@ def render_mainfreight_booking() -> None:
         PALLET_WIDTH_M,
         create_shipment as mf_create_shipment,
         get_label as mf_get_label,
+        build_payload as mf_build_payload,
         default_pickup_datetime,
     )
 
@@ -2230,8 +2231,22 @@ def render_mainfreight_booking() -> None:
                     with st.expander("API response"):
                         st.code(result.api_response[:3000])
 
+            # ── Debug payload viewer ───────────────────────────────────────
+            if "mf_debug_payload" in st.session_state:
+                with st.expander(
+                    f"🔍 Debug — Payload sent to Mainfreight "
+                    f"({st.session_state.get('mf_debug_housebill', '')})",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "POST https://apitest.mainfreight.com/transport/1.0/customer/shipment?region=NZ"
+                        if not str(st.secrets.get("MAINFREIGHT_PRODUCTION", "false")).lower() == "true"
+                        else "POST https://api.mainfreight.com/transport/1.0/customer/shipment?region=NZ"
+                    )
+                    st.json(st.session_state["mf_debug_payload"])
+
             if st.button("Book Another Pallet", type="primary"):
-                for k in (result_key, label_key, label_key_a4):
+                for k in (result_key, label_key, label_key_a4, "mf_debug_payload", "mf_debug_housebill"):
                     st.session_state.pop(k, None)
                 st.rerun()
             return
@@ -2417,6 +2432,21 @@ def render_mainfreight_booking() -> None:
                     st.stop()
 
             pickup_dt = default_pickup_datetime(pickup_date)
+
+            # Capture payload for debug display (stored in session state, shown after rerun)
+            _debug_args = dict(
+                store=store,
+                heights_m=[float(h) for h in heights_m],
+                weights_kg=[float(w) for w in weights_kg],
+                housebill=housebill,
+                pickup_datetime=pickup_dt,
+                use_loscam=use_loscam,
+                length_m=float(pallet_length_m),
+                width_m=float(pallet_width_m),
+                description=freight_desc.strip() or "Shosha Products",
+            )
+            st.session_state["mf_debug_payload"] = mf_build_payload(**_debug_args)
+            st.session_state["mf_debug_housebill"] = housebill
 
             with st.spinner(f"Booking {pallets} pallet(s) to {store.name}…"):
                 result = mf_create_shipment(

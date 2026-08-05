@@ -632,6 +632,10 @@ def track_consignment(consignment_number: str) -> dict:
         return {"error": str(exc)}
 
 
+# Public alias — lets the UI layer inspect the payload without calling the API
+build_payload = _build_payload
+
+
 def default_pickup_datetime(for_date: "date | None" = None) -> datetime:
     """
     Return the pickup datetime for a given date (default = today).
