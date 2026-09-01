@@ -641,6 +641,48 @@ def validate_address(
         return False, {}, str(exc)
 
 
+def delete_shipment(shipment_uuid: str) -> tuple[bool, str]:
+    """
+    DELETE /transport/1.0/customer/shipment/{uuid}?region=NZ
+
+    Cancels an existing shipment.  Only succeeds if the shipment has not yet
+    been processed (picked up) by Mainfreight.
+
+    Returns (success: bool, error_message: str).
+    """
+    if not shipment_uuid:
+        return False, "No shipment UUID — cannot delete."
+    log.info("Mainfreight delete_shipment uuid=%s", shipment_uuid)
+    try:
+        resp = requests.delete(
+            f"{_base_url()}/customer/shipment/{shipment_uuid}",
+            headers=_headers(),
+            params={"region": "NZ"},
+            timeout=30,
+        )
+        log.info(
+            "Mainfreight delete [%s] uuid=%s body=%.300s",
+            resp.status_code, shipment_uuid, resp.text[:300],
+        )
+        if resp.ok:
+            return True, ""
+        try:
+            err  = resp.json()
+            errs = err.get("errors") or []
+            msg  = (
+                "; ".join(e.get("message", str(e)) for e in errs)
+                if errs else err.get("message", f"HTTP {resp.status_code}")
+            )
+        except Exception:
+            msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
+        return False, msg
+    except requests.exceptions.Timeout:
+        return False, "Request timed out (30 s)"
+    except Exception as exc:
+        log.exception("Error deleting shipment uuid=%s", shipment_uuid)
+        return False, str(exc)
+
+
 def track_consignment(consignment_number: str) -> dict:
     """
     GET /transport/1.0/customer/shipment?region=NZ&housebillNumber={n}

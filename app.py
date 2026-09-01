@@ -39,6 +39,7 @@ from services import (
     get_delivery_details,
     get_delivery_runs,
     get_groups,
+    cancel_mainfreight_booking,
     get_mainfreight_booking,
     get_mainfreight_bookings,
     get_pallet_store,
@@ -2526,10 +2527,10 @@ def render_mainfreight_booking() -> None:
         if df.empty:
             st.info("No pallet bookings in this period.")
         else:
-            # Column widths: date | housebill | store | plts | consignment | status | reprint | track
-            _HC = [1.4, 1.5, 2.5, 0.5, 1.8, 0.8, 0.7, 0.7]
+            # Column widths: date | housebill | store | plts | consignment | status | reprint | track | cancel
+            _HC = [1.4, 1.5, 2.5, 0.5, 1.8, 0.8, 0.7, 0.7, 0.7]
             hdr = st.columns(_HC)
-            for col, lbl in zip(hdr, ["Date", "Housebill", "Store", "Plts", "Consignment", "Status", "", ""]):
+            for col, lbl in zip(hdr, ["Date", "Housebill", "Store", "Plts", "Consignment", "Status", "", "", ""]):
                 col.markdown(
                     f"<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
                     f"letter-spacing:0.06em;margin-bottom:0'>{lbl}</p>",
@@ -2625,13 +2626,11 @@ def render_mainfreight_booking() -> None:
 
                 # Track button — production only
                 if status == "Booked":
-                    cons_number = row.get("consignment_number") or ""
                     if rc[7].button("📍", key=tk_key, help="Track shipment via Mainfreight API",
                                     use_container_width=True):
                         with st.spinner(f"Tracking {hb}…"):
                             from mainfreight import track_consignment as _mf_track
-                            _track_result = _mf_track(hb)
-                            st.session_state[tk_res_key] = _track_result
+                            st.session_state[tk_res_key] = _mf_track(hb)
 
                 tk_data = st.session_state.get(tk_res_key)
                 if tk_data:
@@ -2640,6 +2639,37 @@ def render_mainfreight_booking() -> None:
                     else:
                         with st.expander(f"📍 Tracking — {hb}", expanded=True):
                             st.json(tk_data)
+
+                # Cancel button — only for Booked shipments that have a UUID
+                cancel_key    = f"mf_cancel_{hb}"
+                cancel_confirm_key = f"mf_cancel_confirm_{hb}"
+                shipment_uuid = row.get("shipment_uuid") or ""
+                if status == "Booked" and shipment_uuid:
+                    if not st.session_state.get(cancel_confirm_key):
+                        if rc[8].button("🗑️", key=cancel_key, help="Cancel this booking",
+                                        use_container_width=True):
+                            st.session_state[cancel_confirm_key] = True
+                            st.rerun()
+                    else:
+                        st.warning(
+                            f"Cancel **{hb}**? This cannot be undone and only works if Mainfreight hasn't processed it yet."
+                        )
+                        cc1, cc2 = st.columns(2)
+                        if cc1.button("✅ Yes, cancel", key=f"mf_cancel_yes_{hb}", type="primary"):
+                            with st.spinner(f"Cancelling {hb}…"):
+                                from mainfreight import delete_shipment as _mf_delete
+                                ok, err = _mf_delete(shipment_uuid)
+                            if ok:
+                                cancel_mainfreight_booking(hb)
+                                st.session_state.pop(cancel_confirm_key, None)
+                                st.success(f"✅ {hb} cancelled.")
+                                st.rerun()
+                            else:
+                                st.error(f"Cancel failed: {err}")
+                                st.session_state.pop(cancel_confirm_key, None)
+                        if cc2.button("✗ Keep it", key=f"mf_cancel_no_{hb}"):
+                            st.session_state.pop(cancel_confirm_key, None)
+                            st.rerun()
 
     # ── ADDRESS BOOK ─────────────────────────────────────────────────────────
     with tab_ab:

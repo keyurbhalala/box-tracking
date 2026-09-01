@@ -1303,6 +1303,17 @@ def save_mainfreight_booking(
     return booking_id
 
 
+def cancel_mainfreight_booking(housebill_number: str) -> None:
+    """Mark a mainfreight booking as Cancelled in the DB."""
+    with connection() as conn:
+        conn.execute(
+            "UPDATE mainfreight_bookings SET booking_status = 'Cancelled' WHERE housebill_number = ?",
+            (housebill_number,),
+        )
+        audit(conn, "mf_booking", None, "UPDATE",
+              new_values={"housebill": housebill_number, "status": "Cancelled"})
+
+
 def get_mainfreight_bookings(
     store_code: str | None = None,
     shipment_id: int | None = None,
@@ -1325,7 +1336,7 @@ def get_mainfreight_bookings(
         f"""
         SELECT id, housebill_number, pallet_store_name, pallets,
                height_m, weight_per_pallet, use_loscam,
-               consignment_number, tracking_url,
+               shipment_uuid, consignment_number, tracking_url,
                booking_status, label_error, api_error,
                pickup_date, booked_at
         FROM mainfreight_bookings
