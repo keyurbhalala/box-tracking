@@ -2526,10 +2526,10 @@ def render_mainfreight_booking() -> None:
         if df.empty:
             st.info("No pallet bookings in this period.")
         else:
-            # Column widths: date | housebill | store | plts | consignment | status | reprint
-            _HC = [1.4, 1.5, 2.5, 0.5, 1.8, 0.8, 0.7]
+            # Column widths: date | housebill | store | plts | consignment | status | reprint | track
+            _HC = [1.4, 1.5, 2.5, 0.5, 1.8, 0.8, 0.7, 0.7]
             hdr = st.columns(_HC)
-            for col, lbl in zip(hdr, ["Date", "Housebill", "Store", "Plts", "Consignment", "Status", ""]):
+            for col, lbl in zip(hdr, ["Date", "Housebill", "Store", "Plts", "Consignment", "Status", "", ""]):
                 col.markdown(
                     f"<p style='color:#6b7280;font-size:0.72rem;font-weight:700;"
                     f"letter-spacing:0.06em;margin-bottom:0'>{lbl}</p>",
@@ -2540,6 +2540,8 @@ def render_mainfreight_booking() -> None:
                 hb     = row["housebill_number"]
                 status = row.get("booking_status", "")
                 rc     = st.columns(_HC)
+                tk_key    = f"mf_tk_{hb}"
+                tk_res_key = f"mf_tk_res_{hb}"
 
                 rc[0].write(str(row.get("booked_at", ""))[:10])
                 rc[1].write(hb)
@@ -2620,6 +2622,24 @@ def render_mainfreight_booking() -> None:
                         mime="application/pdf",
                         key=f"mf_rp_dl_btn_{hb}",
                     )
+
+                # Track button — production only
+                if status == "Booked":
+                    cons_number = row.get("consignment_number") or ""
+                    if rc[7].button("📍", key=tk_key, help="Track shipment via Mainfreight API",
+                                    use_container_width=True):
+                        with st.spinner(f"Tracking {hb}…"):
+                            from mainfreight import track_consignment as _mf_track
+                            _track_result = _mf_track(hb)
+                            st.session_state[tk_res_key] = _track_result
+
+                tk_data = st.session_state.get(tk_res_key)
+                if tk_data:
+                    if "error" in tk_data:
+                        st.warning(f"Track {hb}: {tk_data['error']}")
+                    else:
+                        with st.expander(f"📍 Tracking — {hb}", expanded=True):
+                            st.json(tk_data)
 
     # ── ADDRESS BOOK ─────────────────────────────────────────────────────────
     with tab_ab:

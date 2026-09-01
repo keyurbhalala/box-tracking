@@ -9,10 +9,11 @@ Architecture
 
 Housebill numbers
 -----------------
-  Range: MAS00000000 – MAS99999999 (allocated by Mainfreight).
+  Test:       MAS  + 8 digits  (MAS00000000  – MAS99999999)
+  Production: MASC + 7 digits  (MASC0000000  – MASC9999999)
   The next sequence number is stored in warehouse_settings.next_mf_housebill_seq
   and incremented atomically before each booking via claim_mf_housebill() in
-  services.py.
+  services.py.  Format is selected automatically based on MAINFREIGHT_PRODUCTION.
 
 Environment
 -----------
@@ -61,29 +62,30 @@ PALLET_WIDTH_M  = 1.00
 # LOSCAM hire details
 _LOSCAM_SUPPLIER    = "L"
 _LOSCAM_PALLET_TYPE = "P"
-_LOSCAM_TXN_TYPE    = "R"   # Retrieval
+_LOSCAM_TXN_TYPE    = "R"        # Retrieval
 _LOSCAM_FROM_ACCT   = "116023"
 
 # Pickup cutoff — 3:30 PM
 PICKUP_CUTOFF = time(15, 30)
 
 # Sender — HighGroup warehouse
+# Structure matches Mainfreight confirmed working payload exactly.
 _SENDER: dict[str, Any] = {
-    "name":         "HIGH GROUP",
-    "streetNumber": "53",
-    "address1":     "O'Rorke Road",
-    "address2":     None,
-    "residential":  False,
-    "suburb":       "Penrose",
-    "postCode":     "1061",
-    "city":         "Auckland",
-    "stateCode":    "NI",
-    "countryCode":  "NZ",
+    "code":        _ACCOUNT_CODE,
+    "name":        "HIGH GROUP",
+    "address1":    "53 O'RORKE ROAD",
+    "address2":    "",
+    "suburb":      "PENROSE",
+    "postCode":    "",
+    "city":        "AUCKLAND",
+    "stateCode":   "",
+    "countryCode": "NZ",
 }
 _SENDER_CONTACT: dict[str, Any] = {
-    "name":         "Vishal Khera",
-    "phone":        "+6429777005",
-    "emailAddress": "vish@highgroup.nz",
+    "name":           "HIGH GROUP",
+    "phone":          "29777005",
+    "phoneExtension": "",
+    "emailAddress":   "vish@highgroup.nz",
 }
 
 # Mainfreight API event code mapping from CSV notification event names
@@ -208,43 +210,55 @@ def _build_notifications(store: PalletStore) -> list[dict]:
 def _build_freight_details(
     heights_m: list[float],
     weights_kg: list[float],
+    housebill: str,
+    use_loscam: bool,
     length_m: float = PALLET_LENGTH_M,
     width_m: float = PALLET_WIDTH_M,
     description: str = "Shosha Products",
 ) -> list[dict]:
-    """One freightDetail entry per pallet (Mainfreight tracks individual units).
+    """One freightDetail entry per pallet — structure confirmed by Mainfreight working payload.
 
-    heights_m / weights_kg — one value per pallet; both lists must have the same
-                             length (= number of pallets).
-    length_m / width_m     — LOSCAM standard (1.20 × 1.00 m) by default; pass
-                             custom values when non-LOSCAM pallet footprint differs.
-    description            — appears on the label and consignment note.
+    - weight / length / width / height sent as strings (Mainfreight requirement).
+    - volume calculated as length × width × height.
+    - customerItemNumber = housebill + "-" + zero-padded pallet index.
+    - hireLines is nested inside each freightDetail (not at shipment level).
     """
-    return [
-        {
-            "packTypeCode": "PLT",
-            "description":  description,
-            "weight":       int(round(w)),
-            "length":       round(length_m, 3),
-            "width":        round(width_m, 3),
-            "height":       round(h, 3),
-            "stackable":    False,
+    details = []
+    for i, (h, w) in enumerate(zip(heights_m, weights_kg)):
+        volume = round(length_m * width_m * h, 2)
+        entry: dict[str, Any] = {
+            "customerItemNumber":  f"{housebill}-{i + 1:04d}",
+            "freightDetailNumber": None,
+            "packTypeCode":        "PLT",
+            "description":         description,
+            "weight":              str(int(round(w))),
+            "volume":              str(volume),
+            "itemLines": [
+                {
+                    "units":              "1",
+                    "packTypeCode":       "PLT",
+                    "itemNumber":         None,
+                    "description":        "Pallet",
+                    "dangerousGoodsLines": [],
+                }
+            ],
+            "length": f"{length_m:.2f}",
+            "width":  f"{width_m:.2f}",
+            "height": f"{h:.2f}",
         }
-        for h, w in zip(heights_m, weights_kg)
-    ]
-
-
-def _build_hire_lines(pallets: int) -> list[dict]:
-    """LOSCAM retrieval hire line."""
-    return [
-        {
-            "supplier":        _LOSCAM_SUPPLIER,
-            "palletType":      _LOSCAM_PALLET_TYPE,
-            "fromAccount":     _LOSCAM_FROM_ACCT,
-            "transactionType": _LOSCAM_TXN_TYPE,
-            "quantity":        pallets,
-        }
-    ]
+        if use_loscam:
+            entry["hireLines"] = [
+                {
+                    "supplier":        _LOSCAM_SUPPLIER,
+                    "palletType":      _LOSCAM_PALLET_TYPE,
+                    "transactionType": _LOSCAM_TXN_TYPE,
+                    "fromAccount":     _LOSCAM_FROM_ACCT,
+                    "toAccount":       "",
+                    "quantity":        1,
+                }
+            ]
+        details.append(entry)
+    return details
 
 
 def _build_payload(
@@ -258,61 +272,88 @@ def _build_payload(
     width_m: float = PALLET_WIDTH_M,
     description: str = "Shosha Products",
 ) -> dict:
-    payload: dict[str, Any] = {
-        "account":           {"code": _ACCOUNT_CODE},
-        "housebillNumber":   housebill,
-        "serviceLevel":      {"code": _SERVICE_LEVEL},
-        "transportMode":     _TRANSPORT_MODE,
-        "freightTerms":      _FREIGHT_TERMS,
-        "routingType":       _ROUTING_TYPE,
-        "systemOfMeasurement": _MEASUREMENT,
+    """Build the Mainfreight shipment payload.
+
+    Structure confirmed against Mainfreight working payload (Aug 2026):
+    - systemOfMeasurement = "Metric" (capital M)
+    - hireLines nested inside each freightDetail (not at shipment level)
+    - weight / length / width / height sent as strings
+    - Empty strings used for optional fields (not null)
+    - Origin sender includes account code
+    """
+    instructions_origin = (
+        "Depot collect — contact Daily Freight"
+        if store.pickup_from_depot else ""
+    )
+    instructions_dest = store.delivery_instructions or ""
+
+    return {
+        "account":             {"code": _ACCOUNT_CODE},
+        "housebillNumber":     housebill,
+        "serviceLevel":        {"code": _SERVICE_LEVEL},
+        "transportMode":       _TRANSPORT_MODE,
+        "freightTerms":        _FREIGHT_TERMS,
+        "routingType":         _ROUTING_TYPE,
+        "systemOfMeasurement": "Metric",   # capital M — confirmed by working payload
         "origin": {
-            "sender":  {"name": _SENDER["name"]},
-            "address": {k: v for k, v in _SENDER.items() if k != "name"},
-            "contact": _SENDER_CONTACT,
-            "pickupTime": {
-                "toDateTime": pickup_datetime.strftime("%Y-%m-%dT%H:%M:%S"),
+            "sender": {
+                "code": _SENDER["code"],
+                "name": _SENDER["name"],
             },
-            "instructions": store.pickup_from_depot
-                            and "Depot collect — contact Daily Freight"
-                            or None,
+            "address": {
+                "streetNumber": "",
+                "address1":     _SENDER["address1"],
+                "address2":     _SENDER["address2"],
+                "suburb":       _SENDER["suburb"],
+                "postCode":     _SENDER["postCode"],
+                "town":         "",
+                "city":         _SENDER["city"],
+                "stateCode":    _SENDER["stateCode"],
+                "countryCode":  _SENDER["countryCode"],
+                "geometry":     {"location": {"latitude": "", "longitude": ""}},
+            },
+            "contact":         _SENDER_CONTACT,
+            "pickupTime":      {"toDateTime": pickup_datetime.strftime("%Y-%m-%dT%H:%M:%S")},
+            "referenceNumber": "",
+            "instructions":    instructions_origin,
         },
         "destination": {
             "receiver": {"name": store.name},
             "address": {
+                "premises":    "",
+                "streetNumber": "",
                 "address1":    store.address1,
-                "address2":    store.address2 or None,
+                "address2":    store.address2 or "",
                 "residential": False,
-                "suburb":      store.suburb or None,
-                "postCode":    store.postcode or None,
+                "suburb":      store.suburb or "",
+                "postCode":    store.postcode or "",
+                "town":        store.city,
                 "city":        store.city,
-                "stateCode":   store.state_code or None,
+                "stateCode":   store.state_code or "",
                 "countryCode": "NZ",
+                "geometry":    {"location": {"latitude": None, "longitude": None}},
             },
             "contact": {
-                "name":         store.contact_name or None,
-                "phone":        store.contact_phone or None,
-                "emailAddress": store.contact_email or None,
+                "name":           store.contact_name or "",
+                "phone":          store.contact_phone or "",
+                "phoneExtension": "",
+                "emailAddress":   store.contact_email or "",
             },
-            "instructions": store.delivery_instructions or None,
+            "deliveryTime":    None,
+            "serviceProvider": None,
+            "referenceNumber": "",
+            "instructions":    instructions_dest,
         },
         "freightDetails": _build_freight_details(
-            heights_m, weights_kg, length_m, width_m, description
+            heights_m, weights_kg, housebill, use_loscam, length_m, width_m, description
         ),
         "references": [
             {"type": "SenderReference", "value": housebill},
         ],
-        # The Mainfreight TEST environment (apitest.mainfreight.com) rejects
-        # notification emails that are not pre-registered in their test system.
-        # Skip notifications in test mode to avoid error TNI003.002.
-        # In production the store's real emails are used.
+        # TEST environment rejects non-whitelisted emails (error TNI003.002) — send []
+        # Production sends the store's real notification emails.
         "notifications": _build_notifications(store) if _is_production() else [],
     }
-
-    if use_loscam:
-        payload["hireLines"] = _build_hire_lines(len(heights_m))
-
-    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -475,21 +516,24 @@ def get_label(
         length_m, width_m, description,
     )
 
-    # Build request array — thermal only for reprints, both formats for new bookings
+    # Build request array — confirmed field names from Mainfreight working payload:
+    #   "region" inside the object, "PageSize" (capital P and S)
     label_request = [
         {
-            "type": "NZLabel",
-            "pageSize": "STOCK_4X6",   # thermal pallet sticker label
-            "format": "PDF",
+            "region":   "NZ",
+            "type":     "NZLabel",
+            "PageSize": "STOCK_4X6",   # thermal pallet sticker label
+            "format":   "PDF",
             "shipment": shipment_payload,
         },
     ]
     if not thermal_only:
         label_request.append(
             {
-                "type": "NZLabel",
-                "pageSize": "A4",      # A4 label sheet (skipped for reprints)
-                "format": "PDF",
+                "region":   "NZ",
+                "type":     "NZLabel",
+                "PageSize": "A4",      # A4 label sheet (skipped for reprints)
+                "format":   "PDF",
                 "shipment": shipment_payload,
             }
         )
@@ -599,24 +643,22 @@ def validate_address(
 
 def track_consignment(consignment_number: str) -> dict:
     """
-    GET /tracking/1.0/references?referenceType=ConsignmentNumber&reference={n}
+    GET /transport/1.0/customer/shipment?region=NZ&housebillNumber={n}
 
     Returns the latest tracking status dict, or {"error": "..."} on failure.
-    Requires the Tracking API key (available in Production now).
+    Uses the same API key as the transport API (MAINFREIGHT_API_KEY in production).
+    Only available in production — test environment does not expose tracking data.
     """
     if not consignment_number:
         return {"error": "No consignment number"}
+    if not _is_production():
+        return {"error": "Tracking is only available in the production environment."}
     try:
-        # Tracking API has its own key (separate from Transport API)
-        try:
-            key = st.secrets["MAINFREIGHT_TRACKING_API_KEY"]
-        except KeyError:
-            return {"error": "MAINFREIGHT_TRACKING_API_KEY not set in secrets.toml"}
-
+        host = "api.mainfreight.com"
         resp = requests.get(
-            "https://api.mainfreight.com/tracking/1.0/references",
-            headers={"Authorization": f"Secret {key}", "Accept": "application/json"},
-            params={"referenceType": "ConsignmentNumber", "reference": consignment_number},
+            f"https://{host}/transport/1.0/customer/shipment",
+            headers=_headers(),
+            params={"region": "NZ", "housebillNumber": consignment_number},
             timeout=30,
         )
         log.info(
