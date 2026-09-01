@@ -1190,11 +1190,20 @@ def claim_mf_housebill() -> str:
     Atomically claim the next Mainfreight housebill number.
 
     Increments next_mf_housebill_seq in warehouse_settings and returns
-    the formatted string e.g. "MAS00000001".
+    the formatted housebill string.
 
-    Range allocated by Mainfreight: MAS00000000 – MAS99999999.
-    Raises RuntimeError if the warehouse row is missing.
+    Format differs by environment:
+      Test:       MAS  + 8 digits  (MAS00000000  – MAS99999999)
+      Production: MASC + 7 digits  (MASC0000000  – MASC9999999)
+
+    Raises RuntimeError if the warehouse row is missing or range is exhausted.
     """
+    from mainfreight import _is_production as _mf_is_production
+    is_prod = _mf_is_production()
+    prefix  = "MASC" if is_prod else "MAS"
+    digits  = 7      if is_prod else 8
+    max_seq = 9_999_999 if is_prod else 99_999_999
+
     with connection() as conn:
         row = conn.execute(
             "SELECT id, next_mf_housebill_seq FROM warehouse_settings ORDER BY id LIMIT 1 FOR UPDATE"
@@ -1202,16 +1211,16 @@ def claim_mf_housebill() -> str:
         if not row:
             raise RuntimeError("warehouse_settings is empty — run init_db() first.")
         seq = row["next_mf_housebill_seq"]
-        if seq >= 99_999_999:
+        if seq >= max_seq:
             raise RuntimeError(
-                "Mainfreight housebill range exhausted (MAS99999999). "
+                f"Mainfreight housebill range exhausted ({prefix}{'9' * digits}). "
                 "Contact Mainfreight for a new range."
             )
         conn.execute(
             "UPDATE warehouse_settings SET next_mf_housebill_seq = ? WHERE id = ?",
             (seq + 1, row["id"]),
         )
-    return f"MAS{seq:08d}"
+    return f"{prefix}{seq:0{digits}d}"
 
 
 def get_mainfreight_booking(housebill_number: str) -> "dict | None":
